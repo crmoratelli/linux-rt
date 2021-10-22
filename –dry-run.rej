@@ -1,0 +1,3575 @@
+--- arch/Kconfig
++++ arch/Kconfig
+@@ -28,6 +28,7 @@ config OPROFILE
+ 	tristate "OProfile system profiling"
+ 	depends on PROFILING
+ 	depends on HAVE_OPROFILE
++	depends on !PREEMPT_RT_FULL
+ 	select RING_BUFFER
+ 	select RING_BUFFER_ALLOW_SWAP
+ 	help
+--- arch/alpha/include/asm/spinlock_types.h
++++ arch/alpha/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef _ALPHA_SPINLOCK_TYPES_H
+ #define _ALPHA_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int lock;
+ } arch_spinlock_t;
+--- arch/arm/Kconfig
++++ arch/arm/Kconfig
+@@ -51,7 +51,7 @@ config ARM
+ 	select HARDIRQS_SW_RESEND
+ 	select HAVE_ARCH_AUDITSYSCALL if (AEABI && !OABI_COMPAT)
+ 	select HAVE_ARCH_BITREVERSE if (CPU_32v7M || CPU_32v7) && !CPU_32v6
+-	select HAVE_ARCH_JUMP_LABEL if !XIP_KERNEL && !CPU_ENDIAN_BE32 && MMU
++	select HAVE_ARCH_JUMP_LABEL if !XIP_KERNEL && !CPU_ENDIAN_BE32 && MMU && !PREEMPT_RT_BASE
+ 	select HAVE_ARCH_KGDB if !CPU_ENDIAN_BE32 && MMU
+ 	select HAVE_ARCH_MMAP_RND_BITS if MMU
+ 	select HAVE_ARCH_SECCOMP_FILTER if (AEABI && !OABI_COMPAT)
+@@ -90,6 +90,7 @@ config ARM
+ 	select HAVE_PERF_EVENTS
+ 	select HAVE_PERF_REGS
+ 	select HAVE_PERF_USER_STACK_DUMP
++	select HAVE_PREEMPT_LAZY
+ 	select HAVE_RCU_TABLE_FREE if (SMP && ARM_LPAE)
+ 	select HAVE_REGS_AND_STACK_ACCESS_API
+ 	select HAVE_RSEQ
+@@ -2163,7 +2164,7 @@ config NEON
+ 
+ config KERNEL_MODE_NEON
+ 	bool "Support for NEON in kernel mode"
+-	depends on NEON && AEABI
++	depends on NEON && AEABI && !PREEMPT_RT_BASE
+ 	help
+ 	  Say Y to include support for NEON in kernel mode.
+ 
+--- arch/arm/configs/at91_dt_defconfig
++++ arch/arm/configs/at91_dt_defconfig
+@@ -19,6 +19,7 @@ CONFIG_ARCH_MULTI_V5=y
+ CONFIG_ARCH_AT91=y
+ CONFIG_SOC_AT91RM9200=y
+ CONFIG_SOC_AT91SAM9=y
++# CONFIG_ATMEL_CLOCKSOURCE_PIT is not set
+ CONFIG_AEABI=y
+ CONFIG_UACCESS_WITH_MEMCPY=y
+ CONFIG_ZBOOT_ROM_TEXT=0x0
+@@ -64,7 +65,6 @@ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_RAM=y
+ CONFIG_BLK_DEV_RAM_COUNT=4
+ CONFIG_BLK_DEV_RAM_SIZE=8192
+-CONFIG_ATMEL_TCLIB=y
+ CONFIG_ATMEL_SSC=y
+ CONFIG_SCSI=y
+ CONFIG_BLK_DEV_SD=y
+--- arch/arm/configs/sama5_defconfig
++++ arch/arm/configs/sama5_defconfig
+@@ -20,6 +20,7 @@ CONFIG_ARCH_AT91=y
+ CONFIG_SOC_SAMA5D2=y
+ CONFIG_SOC_SAMA5D3=y
+ CONFIG_SOC_SAMA5D4=y
++# CONFIG_ATMEL_CLOCKSOURCE_PIT is not set
+ CONFIG_AEABI=y
+ CONFIG_UACCESS_WITH_MEMCPY=y
+ CONFIG_ZBOOT_ROM_TEXT=0x0
+@@ -75,7 +76,6 @@ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_RAM=y
+ CONFIG_BLK_DEV_RAM_COUNT=4
+ CONFIG_BLK_DEV_RAM_SIZE=8192
+-CONFIG_ATMEL_TCLIB=y
+ CONFIG_ATMEL_SSC=y
+ CONFIG_EEPROM_AT24=y
+ CONFIG_SCSI=y
+--- arch/arm/include/asm/irq.h
++++ arch/arm/include/asm/irq.h
+@@ -23,6 +23,8 @@
+ #endif
+ 
+ #ifndef __ASSEMBLY__
++#include <linux/cpumask.h>
++
+ struct irqaction;
+ struct pt_regs;
+ 
+--- arch/arm/include/asm/spinlock_types.h
++++ arch/arm/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef __ASM_SPINLOCK_TYPES_H
+ #define __ASM_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ #define TICKET_SHIFT	16
+ 
+ typedef struct {
+--- arch/arm/include/asm/switch_to.h
++++ arch/arm/include/asm/switch_to.h
+@@ -33,6 +40,7 @@ extern struct task_struct *__switch_to(struct task_struct *, struct thread_info
+ #define switch_to(prev,next,last)					\
+ do {									\
+ 	__complete_pending_tlbi();					\
++	switch_kmaps(prev, next);					\
+ 	last = __switch_to(prev,task_thread_info(prev), task_thread_info(next));	\
+ } while (0)
+ 
+--- arch/arm/include/asm/thread_info.h
++++ arch/arm/include/asm/thread_info.h
+@@ -49,6 +49,7 @@ struct cpu_context_save {
+ struct thread_info {
+ 	unsigned long		flags;		/* low level flags */
+ 	int			preempt_count;	/* 0 => preemptable, <0 => bug */
++	int			preempt_lazy_count; /* 0 => preemptable, <0 => bug */
+ 	mm_segment_t		addr_limit;	/* address limit */
+ 	struct task_struct	*task;		/* main task structure */
+ 	__u32			cpu;		/* cpu */
+@@ -139,7 +140,8 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define TIF_SYSCALL_TRACE	4	/* syscall trace active */
+ #define TIF_SYSCALL_AUDIT	5	/* syscall auditing active */
+ #define TIF_SYSCALL_TRACEPOINT	6	/* syscall tracepoint instrumentation */
+-#define TIF_SECCOMP		7	/* seccomp syscall filtering active */
++#define TIF_SECCOMP		8	/* seccomp syscall filtering active */
++#define TIF_NEED_RESCHED_LAZY	7
+ 
+ #define TIF_NOHZ		12	/* in adaptive nohz mode */
+ #define TIF_USING_IWMMXT	17
+@@ -149,6 +151,7 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+ #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+ #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
++#define _TIF_NEED_RESCHED_LAZY	(1 << TIF_NEED_RESCHED_LAZY)
+ #define _TIF_UPROBE		(1 << TIF_UPROBE)
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+ #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+@@ -164,7 +167,8 @@ extern int vfp_restore_user_hwstate(struct user_vfp *,
+  * Change these and you break ASM code in entry-common.S
+  */
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+-				 _TIF_NOTIFY_RESUME | _TIF_UPROBE)
++				 _TIF_NOTIFY_RESUME | _TIF_UPROBE | \
++				 _TIF_NEED_RESCHED_LAZY)
+ 
+ #endif /* __KERNEL__ */
+ #endif /* __ASM_ARM_THREAD_INFO_H */
+--- arch/arm/kernel/asm-offsets.c
++++ arch/arm/kernel/asm-offsets.c
+@@ -56,6 +56,7 @@ int main(void)
+   BLANK();
+   DEFINE(TI_FLAGS,		offsetof(struct thread_info, flags));
+   DEFINE(TI_PREEMPT,		offsetof(struct thread_info, preempt_count));
++  DEFINE(TI_PREEMPT_LAZY,	offsetof(struct thread_info, preempt_lazy_count));
+   DEFINE(TI_ADDR_LIMIT,		offsetof(struct thread_info, addr_limit));
+   DEFINE(TI_TASK,		offsetof(struct thread_info, task));
+   DEFINE(TI_CPU,		offsetof(struct thread_info, cpu));
+--- arch/arm/kernel/entry-armv.S
++++ arch/arm/kernel/entry-armv.S
+@@ -209,11 +209,18 @@ __irq_svc:
+ 
+ #ifdef CONFIG_PREEMPT
+ 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
+-	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
+ 	teq	r8, #0				@ if preempt count != 0
++	bne	1f				@ return from exeption
++	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
++	tst	r0, #_TIF_NEED_RESCHED		@ if NEED_RESCHED is set
++	blne	svc_preempt			@ preempt!
++
++	ldr	r8, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
++	teq	r8, #0				@ if preempt lazy count != 0
+ 	movne	r0, #0				@ force flags to 0
+-	tst	r0, #_TIF_NEED_RESCHED
++	tst	r0, #_TIF_NEED_RESCHED_LAZY
+ 	blne	svc_preempt
++1:
+ #endif
+ 
+ 	svc_exit r5, irq = 1			@ return from exception
+@@ -228,8 +235,14 @@ svc_preempt:
+ 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
+ 	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
+ 	tst	r0, #_TIF_NEED_RESCHED
++	bne	1b
++	tst	r0, #_TIF_NEED_RESCHED_LAZY
+ 	reteq	r8				@ go again
+-	b	1b
++	ldr	r0, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
++	teq	r0, #0				@ if preempt lazy count != 0
++	beq	1b
++	ret	r8				@ go again
++
+ #endif
+ 
+ __und_fault:
+--- arch/arm/kernel/entry-common.S
++++ arch/arm/kernel/entry-common.S
+@@ -56,7 +56,9 @@ __ret_fast_syscall:
+ 	cmp	r2, #TASK_SIZE
+ 	blne	addr_limit_check_failed
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #((_TIF_SYSCALL_WORK | _TIF_WORK_MASK) & ~_TIF_SECCOMP)
++	bne	fast_work_pending
++	tst	r1, #_TIF_SECCOMP
+ 	bne	fast_work_pending
+ 
+ 
+@@ -93,8 +95,11 @@ __ret_fast_syscall:
+ 	cmp	r2, #TASK_SIZE
+ 	blne	addr_limit_check_failed
+ 	ldr	r1, [tsk, #TI_FLAGS]		@ re-check for syscall tracing
+-	tst	r1, #_TIF_SYSCALL_WORK | _TIF_WORK_MASK
++	tst	r1, #((_TIF_SYSCALL_WORK | _TIF_WORK_MASK) & ~_TIF_SECCOMP)
++	bne	do_slower_path
++	tst	r1, #_TIF_SECCOMP
+ 	beq	no_work_pending
++do_slower_path:
+  UNWIND(.fnend		)
+ ENDPROC(ret_fast_syscall)
+ 
+--- arch/arm/kernel/signal.c
++++ arch/arm/kernel/signal.c
+@@ -652,7 +652,8 @@ do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
+ 	 */
+ 	trace_hardirqs_off();
+ 	do {
+-		if (likely(thread_flags & _TIF_NEED_RESCHED)) {
++		if (likely(thread_flags & (_TIF_NEED_RESCHED |
++					   _TIF_NEED_RESCHED_LAZY))) {
+ 			schedule();
+ 		} else {
+ 			if (unlikely(!user_mode(regs)))
+--- arch/arm/mach-at91/Kconfig
++++ arch/arm/mach-at91/Kconfig
+@@ -107,6 +107,31 @@ config SOC_AT91SAM9
+ 	    AT91SAM9X35
+ 	    AT91SAM9XE
+ 
++comment "Clocksource driver selection"
++
++config ATMEL_CLOCKSOURCE_PIT
++	bool "Periodic Interval Timer (PIT) support"
++	depends on SOC_AT91SAM9 || SOC_SAMA5
++	default SOC_AT91SAM9 || SOC_SAMA5
++	select ATMEL_PIT
++	help
++	  Select this to get a clocksource based on the Atmel Periodic Interval
++	  Timer. It has a relatively low resolution and the TC Block clocksource
++	  should be preferred.
++
++config ATMEL_CLOCKSOURCE_TCB
++	bool "Timer Counter Blocks (TCB) support"
++	depends on SOC_AT91RM9200 || SOC_AT91SAM9 || SOC_SAMA5 || COMPILE_TEST
++	default SOC_AT91RM9200 || SOC_AT91SAM9 || SOC_SAMA5
++	depends on !ATMEL_TCLIB
++	select ATMEL_ARM_TCB_CLKSRC
++	help
++	  Select this to get a high precision clocksource based on a
++	  TC block with a 5+ MHz base clock rate.
++	  On platforms with 16-bit counters, two timer channels are combined
++	  to make a single 32-bit timer.
++	  It can also be used as a clock event device supporting oneshot mode.
++
+ config HAVE_AT91_UTMI
+ 	bool
+ 
+--- arch/arm/mach-exynos/platsmp.c
++++ arch/arm/mach-exynos/platsmp.c
+@@ -239,7 +239,7 @@ static void write_pen_release(int val)
+ 	sync_cache_w(&pen_release);
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ static void exynos_secondary_init(unsigned int cpu)
+ {
+@@ -252,8 +252,8 @@ static void exynos_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int exynos_set_boot_addr(u32 core_id, unsigned long boot_addr)
+@@ -317,7 +317,7 @@ static int exynos_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -344,7 +344,7 @@ static int exynos_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 
+ 		if (timeout == 0) {
+ 			printk(KERN_ERR "cpu1 power enable failed");
+-			spin_unlock(&boot_lock);
++			raw_spin_unlock(&boot_lock);
+ 			return -ETIMEDOUT;
+ 		}
+ 	}
+@@ -390,7 +390,7 @@ static int exynos_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * calibrations, then wait for it to finish
+ 	 */
+ fail:
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? ret : 0;
+ }
+--- arch/arm/mach-hisi/platmcpm.c
++++ arch/arm/mach-hisi/platmcpm.c
+@@ -61,7 +61,7 @@
+ 
+ static void __iomem *sysctrl, *fabric;
+ static int hip04_cpu_table[HIP04_MAX_CLUSTERS][HIP04_MAX_CPUS_PER_CLUSTER];
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ static u32 fabric_phys_addr;
+ /*
+  * [0]: bootwrapper physical address
+@@ -113,7 +113,7 @@ static int hip04_boot_secondary(unsigned int l_cpu, struct task_struct *idle)
+ 	if (cluster >= HIP04_MAX_CLUSTERS || cpu >= HIP04_MAX_CPUS_PER_CLUSTER)
+ 		return -EINVAL;
+ 
+-	spin_lock_irq(&boot_lock);
++	raw_spin_lock_irq(&boot_lock);
+ 
+ 	if (hip04_cpu_table[cluster][cpu])
+ 		goto out;
+@@ -147,7 +147,7 @@ static int hip04_boot_secondary(unsigned int l_cpu, struct task_struct *idle)
+ 
+ out:
+ 	hip04_cpu_table[cluster][cpu]++;
+-	spin_unlock_irq(&boot_lock);
++	raw_spin_unlock_irq(&boot_lock);
+ 
+ 	return 0;
+ }
+@@ -162,11 +162,11 @@ static void hip04_cpu_die(unsigned int l_cpu)
+ 	cpu = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+ 	cluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
+ 
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 	hip04_cpu_table[cluster][cpu]--;
+ 	if (hip04_cpu_table[cluster][cpu] == 1) {
+ 		/* A power_up request went ahead of us. */
+-		spin_unlock(&boot_lock);
++		raw_spin_unlock(&boot_lock);
+ 		return;
+ 	} else if (hip04_cpu_table[cluster][cpu] > 1) {
+ 		pr_err("Cluster %d CPU%d boots multiple times\n", cluster, cpu);
+@@ -174,7 +174,7 @@ static void hip04_cpu_die(unsigned int l_cpu)
+ 	}
+ 
+ 	last_man = hip04_cluster_is_down(cluster);
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 	if (last_man) {
+ 		/* Since it's Cortex A15, disable L2 prefetching. */
+ 		asm volatile(
+@@ -203,7 +203,7 @@ static int hip04_cpu_kill(unsigned int l_cpu)
+ 	       cpu >= HIP04_MAX_CPUS_PER_CLUSTER);
+ 
+ 	count = TIMEOUT_MSEC / POLL_MSEC;
+-	spin_lock_irq(&boot_lock);
++	raw_spin_lock_irq(&boot_lock);
+ 	for (tries = 0; tries < count; tries++) {
+ 		if (hip04_cpu_table[cluster][cpu])
+ 			goto err;
+@@ -211,10 +211,10 @@ static int hip04_cpu_kill(unsigned int l_cpu)
+ 		data = readl_relaxed(sysctrl + SC_CPU_RESET_STATUS(cluster));
+ 		if (data & CORE_WFI_STATUS(cpu))
+ 			break;
+-		spin_unlock_irq(&boot_lock);
++		raw_spin_unlock_irq(&boot_lock);
+ 		/* Wait for clean L2 when the whole cluster is down. */
+ 		msleep(POLL_MSEC);
+-		spin_lock_irq(&boot_lock);
++		raw_spin_lock_irq(&boot_lock);
+ 	}
+ 	if (tries >= count)
+ 		goto err;
+@@ -231,10 +231,10 @@ static int hip04_cpu_kill(unsigned int l_cpu)
+ 		goto err;
+ 	if (hip04_cluster_is_down(cluster))
+ 		hip04_set_snoop_filter(cluster, 0);
+-	spin_unlock_irq(&boot_lock);
++	raw_spin_unlock_irq(&boot_lock);
+ 	return 1;
+ err:
+-	spin_unlock_irq(&boot_lock);
++	raw_spin_unlock_irq(&boot_lock);
+ 	return 0;
+ }
+ #endif
+--- arch/arm/mach-imx/cpuidle-imx6q.c
++++ arch/arm/mach-imx/cpuidle-imx6q.c
+@@ -17,22 +17,22 @@
+ #include "hardware.h"
+ 
+ static int num_idle_cpus = 0;
+-static DEFINE_SPINLOCK(cpuidle_lock);
++static DEFINE_RAW_SPINLOCK(cpuidle_lock);
+ 
+ static int imx6q_enter_wait(struct cpuidle_device *dev,
+ 			    struct cpuidle_driver *drv, int index)
+ {
+-	spin_lock(&cpuidle_lock);
++	raw_spin_lock(&cpuidle_lock);
+ 	if (++num_idle_cpus == num_online_cpus())
+ 		imx6_set_lpm(WAIT_UNCLOCKED);
+-	spin_unlock(&cpuidle_lock);
++	raw_spin_unlock(&cpuidle_lock);
+ 
+ 	cpu_do_idle();
+ 
+-	spin_lock(&cpuidle_lock);
++	raw_spin_lock(&cpuidle_lock);
+ 	if (num_idle_cpus-- == num_online_cpus())
+ 		imx6_set_lpm(WAIT_CLOCKED);
+-	spin_unlock(&cpuidle_lock);
++	raw_spin_unlock(&cpuidle_lock);
+ 
+ 	return index;
+ }
+--- arch/arm/mach-omap2/omap-smp.c
++++ arch/arm/mach-omap2/omap-smp.c
+@@ -69,7 +69,7 @@ static const struct omap_smp_config omap5_cfg __initconst = {
+ 	.startup_addr = omap5_secondary_startup,
+ };
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void __iomem *omap4_get_scu_base(void)
+ {
+@@ -177,8 +177,8 @@ static void omap4_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static int omap4_boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -191,7 +191,7 @@ static int omap4_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * Update the AuxCoreBoot0 with boot state for secondary core.
+@@ -270,7 +270,7 @@ static int omap4_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * Now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return 0;
+ }
+--- arch/arm/mach-prima2/platsmp.c
++++ arch/arm/mach-prima2/platsmp.c
+@@ -22,7 +22,7 @@
+ 
+ static void __iomem *clk_base;
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ static void sirfsoc_secondary_init(unsigned int cpu)
+ {
+@@ -36,8 +36,8 @@ static void sirfsoc_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static const struct of_device_id clk_ids[]  = {
+@@ -75,7 +75,7 @@ static int sirfsoc_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	/* make sure write buffer is drained */
+ 	mb();
+ 
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -107,7 +107,7 @@ static int sirfsoc_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+--- arch/arm/mach-qcom/platsmp.c
++++ arch/arm/mach-qcom/platsmp.c
+@@ -46,7 +46,7 @@
+ 
+ extern void secondary_startup_arm(void);
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ #ifdef CONFIG_HOTPLUG_CPU
+ static void qcom_cpu_die(unsigned int cpu)
+@@ -60,8 +60,8 @@ static void qcom_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static int scss_release_secondary(unsigned int cpu)
+@@ -284,7 +284,7 @@ static int qcom_boot_secondary(unsigned int cpu, int (*func)(unsigned int))
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * Send the secondary CPU a soft interrupt, thereby causing
+@@ -297,7 +297,7 @@ static int qcom_boot_secondary(unsigned int cpu, int (*func)(unsigned int))
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return ret;
+ }
+--- arch/arm/mach-spear/platsmp.c
++++ arch/arm/mach-spear/platsmp.c
+@@ -32,7 +32,7 @@ static void write_pen_release(int val)
+ 	sync_cache_w(&pen_release);
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ static void __iomem *scu_base = IOMEM(VA_SCU_BASE);
+ 
+@@ -47,8 +47,8 @@ static void spear13xx_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static int spear13xx_boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -59,7 +59,7 @@ static int spear13xx_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -84,7 +84,7 @@ static int spear13xx_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+--- arch/arm/mach-sti/platsmp.c
++++ arch/arm/mach-sti/platsmp.c
+@@ -35,7 +35,7 @@ static void write_pen_release(int val)
+ 	sync_cache_w(&pen_release);
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ static void sti_secondary_init(unsigned int cpu)
+ {
+@@ -48,8 +48,8 @@ static void sti_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ static int sti_boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -60,7 +60,7 @@ static int sti_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * The secondary processor is waiting to be released from
+@@ -91,7 +91,7 @@ static int sti_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+--- arch/arm/mm/fault.c
++++ arch/arm/mm/fault.c
+@@ -439,6 +439,9 @@ do_translation_fault(unsigned long addr, unsigned int fsr,
+ 	if (addr < TASK_SIZE)
+ 		return do_page_fault(addr, fsr, regs);
+ 
++	if (interrupts_enabled(regs))
++		local_irq_enable();
++
+ 	if (user_mode(regs))
+ 		goto bad_area;
+ 
+@@ -506,6 +509,9 @@ do_translation_fault(unsigned long addr, unsigned int fsr,
+ static int
+ do_sect_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ {
++	if (interrupts_enabled(regs))
++		local_irq_enable();
++
+ 	do_bad_area(addr, fsr, regs);
+ 	return 0;
+ }
+--- arch/arm/mm/highmem.c
++++ arch/arm/mm/highmem.c
+@@ -34,6 +34,11 @@ static inline pte_t get_fixmap_pte(unsigned long vaddr)
+ 	return *ptep;
+ }
+ 
++static unsigned int fixmap_idx(int type)
++{
++	return FIX_KMAP_BEGIN + type + KM_TYPE_NR * smp_processor_id();
++}
++
+ void *kmap(struct page *page)
+ {
+ 	might_sleep();
+@@ -54,12 +59,13 @@ EXPORT_SYMBOL(kunmap);
+ 
+ void *kmap_atomic(struct page *page)
+ {
++	pte_t pte = mk_pte(page, kmap_prot);
+ 	unsigned int idx;
+ 	unsigned long vaddr;
+ 	void *kmap;
+ 	int type;
+ 
+-	preempt_disable();
++	preempt_disable_nort();
+ 	pagefault_disable();
+ 	if (!PageHighMem(page))
+ 		return page_address(page);
+@@ -79,7 +85,7 @@ void *kmap_atomic(struct page *page)
+ 
+ 	type = kmap_atomic_idx_push();
+ 
+-	idx = FIX_KMAP_BEGIN + type + KM_TYPE_NR * smp_processor_id();
++	idx = fixmap_idx(type);
+ 	vaddr = __fix_to_virt(idx);
+ #ifdef CONFIG_DEBUG_HIGHMEM
+ 	/*
+@@ -93,7 +99,10 @@ void *kmap_atomic(struct page *page)
+ 	 * in place, so the contained TLB flush ensures the TLB is updated
+ 	 * with the new mapping.
+ 	 */
+-	set_fixmap_pte(idx, mk_pte(page, kmap_prot));
++#ifdef CONFIG_PREEMPT_RT_FULL
++	current->kmap_pte[type] = pte;
++#endif
++	set_fixmap_pte(idx, pte);
+ 
+ 	return (void *)vaddr;
+ }
+@@ -106,44 +115,75 @@ void __kunmap_atomic(void *kvaddr)
+ 
+ 	if (kvaddr >= (void *)FIXADDR_START) {
+ 		type = kmap_atomic_idx();
+-		idx = FIX_KMAP_BEGIN + type + KM_TYPE_NR * smp_processor_id();
++		idx = fixmap_idx(type);
+ 
+ 		if (cache_is_vivt())
+ 			__cpuc_flush_dcache_area((void *)vaddr, PAGE_SIZE);
++#ifdef CONFIG_PREEMPT_RT_FULL
++		current->kmap_pte[type] = __pte(0);
++#endif
+ #ifdef CONFIG_DEBUG_HIGHMEM
+ 		BUG_ON(vaddr != __fix_to_virt(idx));
+-		set_fixmap_pte(idx, __pte(0));
+ #else
+ 		(void) idx;  /* to kill a warning */
+ #endif
++		set_fixmap_pte(idx, __pte(0));
+ 		kmap_atomic_idx_pop();
+ 	} else if (vaddr >= PKMAP_ADDR(0) && vaddr < PKMAP_ADDR(LAST_PKMAP)) {
+ 		/* this address was obtained through kmap_high_get() */
+ 		kunmap_high(pte_page(pkmap_page_table[PKMAP_NR(vaddr)]));
+ 	}
+ 	pagefault_enable();
+-	preempt_enable();
++	preempt_enable_nort();
+ }
+ EXPORT_SYMBOL(__kunmap_atomic);
+ 
+ void *kmap_atomic_pfn(unsigned long pfn)
+ {
++	pte_t pte = pfn_pte(pfn, kmap_prot);
+ 	unsigned long vaddr;
+ 	int idx, type;
+ 	struct page *page = pfn_to_page(pfn);
+ 
+-	preempt_disable();
++	preempt_disable_nort();
+ 	pagefault_disable();
+ 	if (!PageHighMem(page))
+ 		return page_address(page);
+ 
+ 	type = kmap_atomic_idx_push();
+-	idx = FIX_KMAP_BEGIN + type + KM_TYPE_NR * smp_processor_id();
++	idx = fixmap_idx(type);
+ 	vaddr = __fix_to_virt(idx);
+ #ifdef CONFIG_DEBUG_HIGHMEM
+ 	BUG_ON(!pte_none(get_fixmap_pte(vaddr)));
+ #endif
+-	set_fixmap_pte(idx, pfn_pte(pfn, kmap_prot));
++#ifdef CONFIG_PREEMPT_RT_FULL
++	current->kmap_pte[type] = pte;
++#endif
++	set_fixmap_pte(idx, pte);
+ 
+ 	return (void *)vaddr;
+ }
++#if defined CONFIG_PREEMPT_RT_FULL
++void switch_kmaps(struct task_struct *prev_p, struct task_struct *next_p)
++{
++	int i;
++
++	/*
++	 * Clear @prev's kmap_atomic mappings
++	 */
++	for (i = 0; i < prev_p->kmap_idx; i++) {
++		int idx = fixmap_idx(i);
++
++		set_fixmap_pte(idx, __pte(0));
++	}
++	/*
++	 * Restore @next_p's kmap_atomic mappings
++	 */
++	for (i = 0; i < next_p->kmap_idx; i++) {
++		int idx = fixmap_idx(i);
++
++		if (!pte_none(next_p->kmap_pte[i]))
++			set_fixmap_pte(idx, next_p->kmap_pte[i]);
++	}
++}
++#endif
+--- arch/arm/plat-versatile/platsmp.c
++++ arch/arm/plat-versatile/platsmp.c
+@@ -32,7 +32,7 @@ static void write_pen_release(int val)
+ 	sync_cache_w(&pen_release);
+ }
+ 
+-static DEFINE_SPINLOCK(boot_lock);
++static DEFINE_RAW_SPINLOCK(boot_lock);
+ 
+ void versatile_secondary_init(unsigned int cpu)
+ {
+@@ -45,8 +45,8 @@ void versatile_secondary_init(unsigned int cpu)
+ 	/*
+ 	 * Synchronise with the boot thread.
+ 	 */
+-	spin_lock(&boot_lock);
+-	spin_unlock(&boot_lock);
++	raw_spin_lock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ }
+ 
+ int versatile_boot_secondary(unsigned int cpu, struct task_struct *idle)
+@@ -57,7 +57,7 @@ int versatile_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * Set synchronisation state between this boot processor
+ 	 * and the secondary one
+ 	 */
+-	spin_lock(&boot_lock);
++	raw_spin_lock(&boot_lock);
+ 
+ 	/*
+ 	 * This is really belt and braces; we hold unintended secondary
+@@ -87,7 +87,7 @@ int versatile_boot_secondary(unsigned int cpu, struct task_struct *idle)
+ 	 * now the secondary core is starting up let it run its
+ 	 * calibrations, then wait for it to finish
+ 	 */
+-	spin_unlock(&boot_lock);
++	raw_spin_unlock(&boot_lock);
+ 
+ 	return pen_release != -1 ? -ENOSYS : 0;
+ }
+--- arch/arm64/Kconfig
++++ arch/arm64/Kconfig
+@@ -141,6 +141,7 @@ config ARM64
+ 	select HAVE_PERF_EVENTS
+ 	select HAVE_PERF_REGS
+ 	select HAVE_PERF_USER_STACK_DUMP
++	select HAVE_PREEMPT_LAZY
+ 	select HAVE_REGS_AND_STACK_ACCESS_API
+ 	select HAVE_RCU_TABLE_FREE
+ 	select HAVE_RSEQ
+--- arch/arm64/crypto/Kconfig
++++ arch/arm64/crypto/Kconfig
+@@ -19,43 +19,43 @@ config CRYPTO_SHA512_ARM64
+ 
+ config CRYPTO_SHA1_ARM64_CE
+ 	tristate "SHA-1 digest algorithm (ARMv8 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SHA1
+ 
+ config CRYPTO_SHA2_ARM64_CE
+ 	tristate "SHA-224/SHA-256 digest algorithm (ARMv8 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SHA256_ARM64
+ 
+ config CRYPTO_SHA512_ARM64_CE
+ 	tristate "SHA-384/SHA-512 digest algorithm (ARMv8 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SHA512_ARM64
+ 
+ config CRYPTO_SHA3_ARM64
+ 	tristate "SHA3 digest algorithm (ARMv8.2 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SHA3
+ 
+ config CRYPTO_SM3_ARM64_CE
+ 	tristate "SM3 digest algorithm (ARMv8.2 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SM3
+ 
+ config CRYPTO_SM4_ARM64_CE
+ 	tristate "SM4 symmetric cipher (ARMv8.2 Crypto Extensions)"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_ALGAPI
+ 	select CRYPTO_SM4
+ 
+ config CRYPTO_GHASH_ARM64_CE
+ 	tristate "GHASH/AES-GCM using ARMv8 Crypto Extensions"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 	select CRYPTO_GF128MUL
+ 	select CRYPTO_AES
+@@ -63,7 +63,7 @@ config CRYPTO_GHASH_ARM64_CE
+ 
+ config CRYPTO_CRCT10DIF_ARM64_CE
+ 	tristate "CRCT10DIF digest algorithm using PMULL instructions"
+-	depends on KERNEL_MODE_NEON && CRC_T10DIF
++	depends on KERNEL_MODE_NEON && CRC_T10DIF && !PREEMPT_RT_BASE
+ 	select CRYPTO_HASH
+ 
+ config CRYPTO_CRC32_ARM64_CE
+@@ -77,13 +77,13 @@ config CRYPTO_AES_ARM64
+ 
+ config CRYPTO_AES_ARM64_CE
+ 	tristate "AES core cipher using ARMv8 Crypto Extensions"
+-	depends on ARM64 && KERNEL_MODE_NEON
++	depends on ARM64 && KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_ALGAPI
+ 	select CRYPTO_AES_ARM64
+ 
+ config CRYPTO_AES_ARM64_CE_CCM
+ 	tristate "AES in CCM mode using ARMv8 Crypto Extensions"
+-	depends on ARM64 && KERNEL_MODE_NEON
++	depends on ARM64 && KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_ALGAPI
+ 	select CRYPTO_AES_ARM64_CE
+ 	select CRYPTO_AES_ARM64
+@@ -91,7 +91,7 @@ config CRYPTO_AES_ARM64_CE_CCM
+ 
+ config CRYPTO_AES_ARM64_CE_BLK
+ 	tristate "AES in ECB/CBC/CTR/XTS modes using ARMv8 Crypto Extensions"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_BLKCIPHER
+ 	select CRYPTO_AES_ARM64_CE
+ 	select CRYPTO_AES_ARM64
+@@ -99,7 +99,7 @@ config CRYPTO_AES_ARM64_CE_BLK
+ 
+ config CRYPTO_AES_ARM64_NEON_BLK
+ 	tristate "AES in ECB/CBC/CTR/XTS modes using NEON instructions"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_BLKCIPHER
+ 	select CRYPTO_AES_ARM64
+ 	select CRYPTO_AES
+@@ -107,13 +107,13 @@ config CRYPTO_AES_ARM64_NEON_BLK
+ 
+ config CRYPTO_CHACHA20_NEON
+ 	tristate "NEON accelerated ChaCha20 symmetric cipher"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_BLKCIPHER
+ 	select CRYPTO_CHACHA20
+ 
+ config CRYPTO_AES_ARM64_BS
+ 	tristate "AES in ECB/CBC/CTR/XTS modes using bit-sliced NEON algorithm"
+-	depends on KERNEL_MODE_NEON
++	depends on KERNEL_MODE_NEON && !PREEMPT_RT_BASE
+ 	select CRYPTO_BLKCIPHER
+ 	select CRYPTO_AES_ARM64_NEON_BLK
+ 	select CRYPTO_AES_ARM64
+--- arch/arm64/crypto/crc32-ce-glue.c
++++ arch/arm64/crypto/crc32-ce-glue.c
+@@ -208,7 +208,8 @@ static struct shash_alg crc32_pmull_algs[] = { {
+ 
+ static int __init crc32_pmull_mod_init(void)
+ {
+-	if (IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && (elf_hwcap & HWCAP_PMULL)) {
++	if (IS_ENABLED(CONFIG_KERNEL_MODE_NEON) &&
++	    !IS_ENABLED(CONFIG_PREEMPT_RT_BASE) && (elf_hwcap & HWCAP_PMULL)) {
+ 		crc32_pmull_algs[0].update = crc32_pmull_update;
+ 		crc32_pmull_algs[1].update = crc32c_pmull_update;
+ 
+--- arch/arm64/include/asm/alternative.h
++++ arch/arm64/include/asm/alternative.h
+@@ -35,6 +35,12 @@ void apply_alternatives_module(void *start, size_t length);
+ static inline void apply_alternatives_module(void *start, size_t length) { }
+ #endif
+ 
++#ifdef CONFIG_KVM_ARM_HOST
++void kvm_compute_layout(void);
++#else
++static inline void kvm_compute_layout(void) { }
++#endif
++
+ #define ALTINSTR_ENTRY(feature)					              \
+ 	" .word 661b - .\n"				/* label           */ \
+ 	" .word 663f - .\n"				/* new instruction */ \
+--- arch/arm64/include/asm/spinlock_types.h
++++ arch/arm64/include/asm/spinlock_types.h
+@@ -16,10 +16,6 @@
+ #ifndef __ASM_SPINLOCK_TYPES_H
+ #define __ASM_SPINLOCK_TYPES_H
+ 
+-#if !defined(__LINUX_SPINLOCK_TYPES_H) && !defined(__ASM_SPINLOCK_H)
+-# error "please don't include this file directly"
+-#endif
+-
+ #include <asm-generic/qspinlock_types.h>
+ #include <asm-generic/qrwlock_types.h>
+ 
+--- arch/arm64/include/asm/thread_info.h
++++ arch/arm64/include/asm/thread_info.h
+@@ -43,6 +43,7 @@ struct thread_info {
+ 	u64			ttbr0;		/* saved TTBR0_EL1 */
+ #endif
+ 	int			preempt_count;	/* 0 => preemptable, <0 => bug */
++	int			preempt_lazy_count; /* 0 => preemptable, <0 => bug */
+ };
+ 
+ #define thread_saved_pc(tsk)	\
+@@ -76,6 +77,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define TIF_FOREIGN_FPSTATE	3	/* CPU's FP state is not current's */
+ #define TIF_UPROBE		4	/* uprobe breakpoint or singlestep */
+ #define TIF_FSCHECK		5	/* Check FS is USER_DS on return */
++#define TIF_NEED_RESCHED_LAZY	6
+ #define TIF_NOHZ		7
+ #define TIF_SYSCALL_TRACE	8
+ #define TIF_SYSCALL_AUDIT	9
+@@ -94,6 +96,7 @@ void arch_release_task_struct(struct task_struct *tsk);
+ #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
+ #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
+ #define _TIF_FOREIGN_FPSTATE	(1 << TIF_FOREIGN_FPSTATE)
++#define _TIF_NEED_RESCHED_LAZY	(1 << TIF_NEED_RESCHED_LAZY)
+ #define _TIF_NOHZ		(1 << TIF_NOHZ)
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+ #define _TIF_SYSCALL_AUDIT	(1 << TIF_SYSCALL_AUDIT)
+@@ -107,8 +110,9 @@ void arch_release_task_struct(struct task_struct *tsk);
+ 
+ #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
+-				 _TIF_UPROBE | _TIF_FSCHECK)
++				 _TIF_UPROBE | _TIF_FSCHECK | _TIF_NEED_RESCHED_LAZY)
+ 
++#define _TIF_NEED_RESCHED_MASK	(_TIF_NEED_RESCHED | _TIF_NEED_RESCHED_LAZY)
+ #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+ 				 _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | \
+ 				 _TIF_NOHZ)
+--- arch/arm64/kernel/alternative.c
++++ arch/arm64/kernel/alternative.c
+@@ -212,6 +212,7 @@ static int __apply_alternatives_multi_stop(void *unused)
+ void __init apply_alternatives_all(void)
+ {
+ 	/* better not try code patching on a live SMP system */
++	kvm_compute_layout();
+ 	stop_machine(__apply_alternatives_multi_stop, NULL, cpu_online_mask);
+ }
+ 
+--- arch/arm64/kernel/asm-offsets.c
++++ arch/arm64/kernel/asm-offsets.c
+@@ -41,6 +41,7 @@ int main(void)
+   BLANK();
+   DEFINE(TSK_TI_FLAGS,		offsetof(struct task_struct, thread_info.flags));
+   DEFINE(TSK_TI_PREEMPT,	offsetof(struct task_struct, thread_info.preempt_count));
++  DEFINE(TSK_TI_PREEMPT_LAZY,	offsetof(struct task_struct, thread_info.preempt_lazy_count));
+   DEFINE(TSK_TI_ADDR_LIMIT,	offsetof(struct task_struct, thread_info.addr_limit));
+ #ifdef CONFIG_ARM64_SW_TTBR0_PAN
+   DEFINE(TSK_TI_TTBR0,		offsetof(struct task_struct, thread_info.ttbr0));
+--- arch/arm64/kernel/entry.S
++++ arch/arm64/kernel/entry.S
+@@ -623,11 +623,16 @@ el1_irq:
+ 
+ #ifdef CONFIG_PREEMPT
+ 	ldr	w24, [tsk, #TSK_TI_PREEMPT]	// get preempt count
+-	cbnz	w24, 1f				// preempt count != 0
++	cbnz	w24, 2f				// preempt count != 0
+ 	ldr	x0, [tsk, #TSK_TI_FLAGS]	// get flags
+-	tbz	x0, #TIF_NEED_RESCHED, 1f	// needs rescheduling?
+-	bl	el1_preempt
++	tbnz	x0, #TIF_NEED_RESCHED, 1f	// needs rescheduling?
++
++	ldr	w24, [tsk, #TSK_TI_PREEMPT_LAZY] // get preempt lazy count
++	cbnz	w24, 2f				// preempt lazy count != 0
++	tbz	x0, #TIF_NEED_RESCHED_LAZY, 2f	// needs rescheduling?
+ 1:
++	bl	el1_preempt
++2:
+ #endif
+ #ifdef CONFIG_TRACE_IRQFLAGS
+ 	bl	trace_hardirqs_on
+@@ -641,6 +646,7 @@ el1_preempt:
+ 1:	bl	preempt_schedule_irq		// irq en/disable is done inside
+ 	ldr	x0, [tsk, #TSK_TI_FLAGS]	// get new tasks TI_FLAGS
+ 	tbnz	x0, #TIF_NEED_RESCHED, 1b	// needs rescheduling?
++	tbnz	x0, #TIF_NEED_RESCHED_LAZY, 1b	// needs rescheduling?
+ 	ret	x24
+ #endif
+ 
+--- arch/arm64/kernel/fpsimd.c
++++ arch/arm64/kernel/fpsimd.c
+@@ -559,6 +569,7 @@ int sve_set_vector_length(struct task_struct *task,
+ 	 * non-SVE thread.
+ 	 */
+ 	if (task == current) {
++		preempt_disable();
+ 		local_bh_disable();
+ 
+ 		fpsimd_save();
+@@ -569,8 +580,10 @@ int sve_set_vector_length(struct task_struct *task,
+ 	if (test_and_clear_tsk_thread_flag(task, TIF_SVE))
+ 		sve_to_fpsimd(task);
+ 
+-	if (task == current)
++	if (task == current) {
+ 		local_bh_enable();
++		preempt_enable();
++	}
+ 
+ 	/*
+ 	 * Force reallocation of task SVE state to the correct size
+@@ -825,6 +838,7 @@ asmlinkage void do_sve_acc(unsigned int esr, struct pt_regs *regs)
+ 
+ 	sve_alloc(current);
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	fpsimd_save();
+@@ -838,6 +852,7 @@ asmlinkage void do_sve_acc(unsigned int esr, struct pt_regs *regs)
+ 		WARN_ON(1); /* SVE access shouldn't have trapped */
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -904,10 +919,12 @@ void fpsimd_thread_switch(struct task_struct *next)
+ void fpsimd_flush_thread(void)
+ {
+ 	int vl, supported_vl;
++	void *mem = NULL;
+ 
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	memset(&current->thread.uw.fpsimd_state, 0,
+@@ -916,7 +933,7 @@ void fpsimd_flush_thread(void)
+ 
+ 	if (system_supports_sve()) {
+ 		clear_thread_flag(TIF_SVE);
+-		sve_free(current);
++		mem = sve_free_atomic(current);
+ 
+ 		/*
+ 		 * Reset the task vector length as required.
+@@ -952,6 +969,8 @@ void fpsimd_flush_thread(void)
+ 	set_thread_flag(TIF_FOREIGN_FPSTATE);
+ 
+ 	local_bh_enable();
++	preempt_enable();
++	kfree(mem);
+ }
+ 
+ /*
+@@ -963,9 +982,11 @@ void fpsimd_preserve_current_state(void)
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 	fpsimd_save();
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -1036,6 +1057,7 @@ void fpsimd_restore_current_state(void)
+ 		return;
+ 	}
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	if (test_and_clear_thread_flag(TIF_FOREIGN_FPSTATE)) {
+@@ -1044,6 +1066,7 @@ void fpsimd_restore_current_state(void)
+ 	}
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -1056,6 +1079,7 @@ void fpsimd_update_current_state(struct user_fpsimd_state const *state)
+ 	if (WARN_ON(!system_supports_fpsimd()))
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	current->thread.uw.fpsimd_state = *state;
+@@ -1068,6 +1092,7 @@ void fpsimd_update_current_state(struct user_fpsimd_state const *state)
+ 	clear_thread_flag(TIF_FOREIGN_FPSTATE);
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -1114,6 +1139,7 @@ void kernel_neon_begin(void)
+ 
+ 	BUG_ON(!may_use_simd());
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	__this_cpu_write(kernel_neon_busy, true);
+@@ -1127,6 +1153,7 @@ void kernel_neon_begin(void)
+ 	preempt_disable();
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ EXPORT_SYMBOL(kernel_neon_begin);
+ 
+--- arch/arm64/kernel/signal.c
++++ arch/arm64/kernel/signal.c
+@@ -919,7 +919,7 @@ asmlinkage void do_notify_resume(struct pt_regs *regs,
+ 		/* Check valid user FS if needed */
+ 		addr_limit_user_check();
+ 
+-		if (thread_flags & _TIF_NEED_RESCHED) {
++		if (thread_flags & _TIF_NEED_RESCHED_MASK) {
+ 			/* Unmask Debug and SError for the next task */
+ 			local_daif_restore(DAIF_PROCCTX_NOIRQ);
+ 
+--- arch/arm64/kvm/va_layout.c
++++ arch/arm64/kvm/va_layout.c
+@@ -33,7 +33,7 @@ static u8 tag_lsb;
+ static u64 tag_val;
+ static u64 va_mask;
+ 
+-static void compute_layout(void)
++__init void kvm_compute_layout(void)
+ {
+ 	phys_addr_t idmap_addr = __pa_symbol(__hyp_idmap_text_start);
+ 	u64 hyp_va_msb;
+@@ -121,8 +121,6 @@ void __init kvm_update_va_mask(struct alt_instr *alt,
+ 
+ 	BUG_ON(nr_inst != 5);
+ 
+-	if (!has_vhe() && !va_mask)
+-		compute_layout();
+ 
+ 	for (i = 0; i < nr_inst; i++) {
+ 		u32 rd, rn, insn, oinsn;
+@@ -167,9 +165,6 @@ void kvm_patch_vector_branch(struct alt_instr *alt,
+ 		return;
+ 	}
+ 
+-	if (!va_mask)
+-		compute_layout();
+-
+ 	/*
+ 	 * Compute HYP VA by using the same computation as kern_hyp_va()
+ 	 */
+--- arch/hexagon/include/asm/spinlock_types.h
++++ arch/hexagon/include/asm/spinlock_types.h
+@@ -21,10 +21,6 @@
+ #ifndef _ASM_SPINLOCK_TYPES_H
+ #define _ASM_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int lock;
+ } arch_spinlock_t;
+--- arch/ia64/include/asm/spinlock_types.h
++++ arch/ia64/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef _ASM_IA64_SPINLOCK_TYPES_H
+ #define _ASM_IA64_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int lock;
+ } arch_spinlock_t;
+--- arch/ia64/kernel/mca.c
++++ arch/ia64/kernel/mca.c
+@@ -1824,7 +1824,7 @@ format_mca_init_stack(void *mca_data, unsigned long offset,
+ 	ti->cpu = cpu;
+ 	p->stack = ti;
+ 	p->state = TASK_UNINTERRUPTIBLE;
+-	cpumask_set_cpu(cpu, &p->cpus_allowed);
++	cpumask_set_cpu(cpu, &p->cpus_mask);
+ 	INIT_LIST_HEAD(&p->tasks);
+ 	p->parent = p->real_parent = p->group_leader = p;
+ 	INIT_LIST_HEAD(&p->children);
+--- arch/mips/Kconfig
++++ arch/mips/Kconfig
+@@ -2519,7 +2519,7 @@ config MIPS_CRC_SUPPORT
+ #
+ config HIGHMEM
+ 	bool "High Memory Support"
+-	depends on 32BIT && CPU_SUPPORTS_HIGHMEM && SYS_SUPPORTS_HIGHMEM && !CPU_MIPS32_3_5_EVA
++	depends on 32BIT && CPU_SUPPORTS_HIGHMEM && SYS_SUPPORTS_HIGHMEM && !CPU_MIPS32_3_5_EVA && !PREEMPT_RT_FULL
+ 
+ config CPU_SUPPORTS_HIGHMEM
+ 	bool
+--- arch/mips/include/asm/switch_to.h
++++ arch/mips/include/asm/switch_to.h
+@@ -42,7 +42,7 @@ extern struct task_struct *ll_task;
+  * inline to try to keep the overhead down. If we have been forced to run on
+  * a "CPU" with an FPU because of a previous high level of FP computation,
+  * but did not actually use the FPU during the most recent time-slice (CU1
+- * isn't set), we undo the restriction on cpus_allowed.
++ * isn't set), we undo the restriction on cpus_mask.
+  *
+  * We're not calling set_cpus_allowed() here, because we have no need to
+  * force prompt migration - we're already switching the current CPU to a
+@@ -57,7 +57,7 @@ do {									\
+ 	    test_ti_thread_flag(__prev_ti, TIF_FPUBOUND) &&		\
+ 	    (!(KSTK_STATUS(prev) & ST0_CU1))) {				\
+ 		clear_ti_thread_flag(__prev_ti, TIF_FPUBOUND);		\
+-		prev->cpus_allowed = prev->thread.user_cpus_allowed;	\
++		prev->cpus_mask = prev->thread.user_cpus_allowed;	\
+ 	}								\
+ 	next->thread.emulated_fp = 0;					\
+ } while(0)
+--- arch/mips/kernel/mips-mt-fpaff.c
++++ arch/mips/kernel/mips-mt-fpaff.c
+@@ -177,7 +177,7 @@ asmlinkage long mipsmt_sys_sched_getaffinity(pid_t pid, unsigned int len,
+ 	if (retval)
+ 		goto out_unlock;
+ 
+-	cpumask_or(&allowed, &p->thread.user_cpus_allowed, &p->cpus_allowed);
++	cpumask_or(&allowed, &p->thread.user_cpus_allowed, p->cpus_ptr);
+ 	cpumask_and(&mask, &allowed, cpu_active_mask);
+ 
+ out_unlock:
+--- arch/mips/kernel/traps.c
++++ arch/mips/kernel/traps.c
+@@ -1174,12 +1174,12 @@ static void mt_ase_fp_affinity(void)
+ 		 * restricted the allowed set to exclude any CPUs with FPUs,
+ 		 * we'll skip the procedure.
+ 		 */
+-		if (cpumask_intersects(&current->cpus_allowed, &mt_fpu_cpumask)) {
++		if (cpumask_intersects(&current->cpus_mask, &mt_fpu_cpumask)) {
+ 			cpumask_t tmask;
+ 
+ 			current->thread.user_cpus_allowed
+-				= current->cpus_allowed;
+-			cpumask_and(&tmask, &current->cpus_allowed,
++				= current->cpus_mask;
++			cpumask_and(&tmask, &current->cpus_mask,
+ 				    &mt_fpu_cpumask);
+ 			set_cpus_allowed_ptr(current, &tmask);
+ 			set_thread_flag(TIF_FPUBOUND);
+--- arch/powerpc/Kconfig
++++ arch/powerpc/Kconfig
+@@ -105,10 +105,11 @@ config LOCKDEP_SUPPORT
+ 
+ config RWSEM_GENERIC_SPINLOCK
+ 	bool
++	default y if PREEMPT_RT_FULL
+ 
+ config RWSEM_XCHGADD_ALGORITHM
+ 	bool
+-	default y
++	default y if !PREEMPT_RT_FULL
+ 
+ config GENERIC_LOCKBREAK
+ 	bool
+@@ -215,6 +216,7 @@ config PPC
+ 	select HAVE_HARDLOCKUP_DETECTOR_PERF	if PERF_EVENTS && HAVE_PERF_EVENTS_NMI && !HAVE_HARDLOCKUP_DETECTOR_ARCH
+ 	select HAVE_PERF_REGS
+ 	select HAVE_PERF_USER_STACK_DUMP
++	select HAVE_PREEMPT_LAZY
+ 	select HAVE_RCU_TABLE_FREE		if SMP
+ 	select HAVE_REGS_AND_STACK_ACCESS_API
+ 	select HAVE_RELIABLE_STACKTRACE		if PPC64 && CPU_LITTLE_ENDIAN
+@@ -398,7 +400,7 @@ menu "Kernel options"
+ 
+ config HIGHMEM
+ 	bool "High memory support"
+-	depends on PPC32
++	depends on PPC32 && !PREEMPT_RT_FULL
+ 
+ source kernel/Kconfig.hz
+ 
+--- arch/powerpc/include/asm/spinlock_types.h
++++ arch/powerpc/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef _ASM_POWERPC_SPINLOCK_TYPES_H
+ #define _ASM_POWERPC_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int slock;
+ } arch_spinlock_t;
+--- arch/powerpc/include/asm/thread_info.h
++++ arch/powerpc/include/asm/thread_info.h
+@@ -37,6 +37,8 @@ struct thread_info {
+ 	int		cpu;			/* cpu we're on */
+ 	int		preempt_count;		/* 0 => preemptable,
+ 						   <0 => BUG */
++	int		preempt_lazy_count;	/* 0 => preemptable,
++						   <0 => BUG */
+ 	unsigned long	local_flags;		/* private flags for thread */
+ #ifdef CONFIG_LIVEPATCH
+ 	unsigned long *livepatch_sp;
+@@ -81,18 +83,18 @@ extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src
+ #define TIF_SIGPENDING		1	/* signal pending */
+ #define TIF_NEED_RESCHED	2	/* rescheduling necessary */
+ #define TIF_FSCHECK		3	/* Check FS is USER_DS on return */
+-#define TIF_32BIT		4	/* 32 bit binary */
+ #define TIF_RESTORE_TM		5	/* need to restore TM FP/VEC/VSX */
+ #define TIF_PATCH_PENDING	6	/* pending live patching update */
+ #define TIF_SYSCALL_AUDIT	7	/* syscall auditing active */
+ #define TIF_SINGLESTEP		8	/* singlestepping active */
+ #define TIF_NOHZ		9	/* in adaptive nohz mode */
+ #define TIF_SECCOMP		10	/* secure computing */
+-#define TIF_RESTOREALL		11	/* Restore all regs (implies NOERROR) */
+-#define TIF_NOERROR		12	/* Force successful syscall return */
++
++#define TIF_NEED_RESCHED_LAZY	11	/* lazy rescheduling necessary */
++#define TIF_SYSCALL_TRACEPOINT	12	/* syscall tracepoint instrumentation */
++
+ #define TIF_NOTIFY_RESUME	13	/* callback before returning to user */
+ #define TIF_UPROBE		14	/* breakpointed or single-stepping */
+-#define TIF_SYSCALL_TRACEPOINT	15	/* syscall tracepoint instrumentation */
+ #define TIF_EMULATE_STACK_STORE	16	/* Is an instruction emulation
+ 						for stack store? */
+ #define TIF_MEMDIE		17	/* is terminating due to OOM killer */
+@@ -100,6 +102,10 @@ extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src
+ #define TIF_ELF2ABI		18	/* function descriptors must die! */
+ #endif
+ #define TIF_POLLING_NRFLAG	19	/* true if poll_idle() is polling TIF_NEED_RESCHED */
++#define TIF_32BIT		20	/* 32 bit binary */
++#define TIF_RESTOREALL		21	/* Restore all regs (implies NOERROR) */
++#define TIF_NOERROR		22	/* Force successful syscall return */
++
+ 
+ /* as above, but as bit values */
+ #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
+@@ -119,6 +125,7 @@ extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src
+ #define _TIF_SYSCALL_TRACEPOINT	(1<<TIF_SYSCALL_TRACEPOINT)
+ #define _TIF_EMULATE_STACK_STORE	(1<<TIF_EMULATE_STACK_STORE)
+ #define _TIF_NOHZ		(1<<TIF_NOHZ)
++#define _TIF_NEED_RESCHED_LAZY	(1<<TIF_NEED_RESCHED_LAZY)
+ #define _TIF_FSCHECK		(1<<TIF_FSCHECK)
+ #define _TIF_SYSCALL_DOTRACE	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+ 				 _TIF_SECCOMP | _TIF_SYSCALL_TRACEPOINT | \
+@@ -127,8 +134,9 @@ extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src
+ #define _TIF_USER_WORK_MASK	(_TIF_SIGPENDING | _TIF_NEED_RESCHED | \
+ 				 _TIF_NOTIFY_RESUME | _TIF_UPROBE | \
+ 				 _TIF_RESTORE_TM | _TIF_PATCH_PENDING | \
+-				 _TIF_FSCHECK)
++				 _TIF_FSCHECK | _TIF_NEED_RESCHED_LAZY)
+ #define _TIF_PERSYSCALL_MASK	(_TIF_RESTOREALL|_TIF_NOERROR)
++#define _TIF_NEED_RESCHED_MASK	(_TIF_NEED_RESCHED | _TIF_NEED_RESCHED_LAZY)
+ 
+ /* Bits in local_flags */
+ /* Don't move TLF_NAPPING without adjusting the code in entry_32.S */
+--- arch/powerpc/kernel/asm-offsets.c
++++ arch/powerpc/kernel/asm-offsets.c
+@@ -156,6 +156,7 @@ int main(void)
+ 	OFFSET(TI_FLAGS, thread_info, flags);
+ 	OFFSET(TI_LOCAL_FLAGS, thread_info, local_flags);
+ 	OFFSET(TI_PREEMPT, thread_info, preempt_count);
++	OFFSET(TI_PREEMPT_LAZY, thread_info, preempt_lazy_count);
+ 	OFFSET(TI_TASK, thread_info, task);
+ 	OFFSET(TI_CPU, thread_info, cpu);
+ 
+--- arch/powerpc/kernel/entry_32.S
++++ arch/powerpc/kernel/entry_32.S
+@@ -393,7 +393,9 @@ ret_from_syscall:
+ 	MTMSRD(r10)
+ 	lwz	r9,TI_FLAGS(r12)
+ 	li	r8,-MAX_ERRNO
+-	andi.	r0,r9,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)
++	lis	r0,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)@h
++	ori	r0,r0, (_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)@l
++	and.	r0,r9,r0
+ 	bne-	syscall_exit_work
+ 	cmplw	0,r3,r8
+ 	blt+	syscall_exit_cont
+@@ -511,13 +513,13 @@ syscall_dotrace:
+ 	b	syscall_dotrace_cont
+ 
+ syscall_exit_work:
+-	andi.	r0,r9,_TIF_RESTOREALL
++	andis.	r0,r9,_TIF_RESTOREALL@h
+ 	beq+	0f
+ 	REST_NVGPRS(r1)
+ 	b	2f
+ 0:	cmplw	0,r3,r8
+ 	blt+	1f
+-	andi.	r0,r9,_TIF_NOERROR
++	andis.	r0,r9,_TIF_NOERROR@h
+ 	bne-	1f
+ 	lwz	r11,_CCR(r1)			/* Load CR */
+ 	neg	r3,r3
+@@ -526,12 +528,12 @@ syscall_exit_work:
+ 
+ 1:	stw	r6,RESULT(r1)	/* Save result */
+ 	stw	r3,GPR3(r1)	/* Update return value */
+-2:	andi.	r0,r9,(_TIF_PERSYSCALL_MASK)
++2:	andis.	r0,r9,(_TIF_PERSYSCALL_MASK)@h
+ 	beq	4f
+ 
+ 	/* Clear per-syscall TIF flags if any are set.  */
+ 
+-	li	r11,_TIF_PERSYSCALL_MASK
++	lis	r11,_TIF_PERSYSCALL_MASK@h
+ 	addi	r12,r12,TI_FLAGS
+ 3:	lwarx	r8,0,r12
+ 	andc	r8,r8,r11
+@@ -888,7 +890,14 @@ resume_kernel:
+ 	cmpwi	0,r0,0		/* if non-zero, just restore regs and return */
+ 	bne	restore
+ 	andi.	r8,r8,_TIF_NEED_RESCHED
++	bne+	1f
++	lwz	r0,TI_PREEMPT_LAZY(r9)
++	cmpwi	0,r0,0		/* if non-zero, just restore regs and return */
++	bne	restore
++	lwz	r0,TI_FLAGS(r9)
++	andi.	r0,r0,_TIF_NEED_RESCHED_LAZY
+ 	beq+	restore
++1:
+ 	lwz	r3,_MSR(r1)
+ 	andi.	r0,r3,MSR_EE	/* interrupts off? */
+ 	beq	restore		/* don't schedule if so */
+@@ -899,11 +908,11 @@ resume_kernel:
+ 	 */
+ 	bl	trace_hardirqs_off
+ #endif
+-1:	bl	preempt_schedule_irq
++2:	bl	preempt_schedule_irq
+ 	CURRENT_THREAD_INFO(r9, r1)
+ 	lwz	r3,TI_FLAGS(r9)
+-	andi.	r0,r3,_TIF_NEED_RESCHED
+-	bne-	1b
++	andi.	r0,r3,_TIF_NEED_RESCHED_MASK
++	bne-	2b
+ #ifdef CONFIG_TRACE_IRQFLAGS
+ 	/* And now, to properly rebalance the above, we tell lockdep they
+ 	 * are being turned back on, which will happen when we return
+@@ -1232,7 +1241,7 @@ global_dbcr0:
+ #endif /* !(CONFIG_4xx || CONFIG_BOOKE) */
+ 
+ do_work:			/* r10 contains MSR_KERNEL here */
+-	andi.	r0,r9,_TIF_NEED_RESCHED
++	andi.	r0,r9,_TIF_NEED_RESCHED_MASK
+ 	beq	do_user_signal
+ 
+ do_resched:			/* r10 contains MSR_KERNEL here */
+@@ -1253,7 +1262,7 @@ recheck:
+ 	MTMSRD(r10)		/* disable interrupts */
+ 	CURRENT_THREAD_INFO(r9, r1)
+ 	lwz	r9,TI_FLAGS(r9)
+-	andi.	r0,r9,_TIF_NEED_RESCHED
++	andi.	r0,r9,_TIF_NEED_RESCHED_MASK
+ 	bne-	do_resched
+ 	andi.	r0,r9,_TIF_USER_WORK_MASK
+ 	beq	restore_user
+--- arch/powerpc/kernel/entry_64.S
++++ arch/powerpc/kernel/entry_64.S
+@@ -176,7 +176,7 @@ system_call:			/* label this so stack traces look sane */
+  * based on caller's run-mode / personality.
+  */
+ 	ld	r11,SYS_CALL_TABLE@toc(2)
+-	andi.	r10,r10,_TIF_32BIT
++	andis.	r10,r10,_TIF_32BIT@h
+ 	beq	15f
+ 	addi	r11,r11,8	/* use 32-bit syscall entries */
+ 	clrldi	r3,r3,32
+@@ -250,7 +250,9 @@ system_call_exit:
+ 
+ 	ld	r9,TI_FLAGS(r12)
+ 	li	r11,-MAX_ERRNO
+-	andi.	r0,r9,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)
++	lis	r0,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)@h
++	ori	r0,r0,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)@l
++	and.	r0,r9,r0
+ 	bne-	.Lsyscall_exit_work
+ 
+ 	andi.	r0,r8,MSR_FP
+@@ -363,25 +365,25 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
+ 	/* If TIF_RESTOREALL is set, don't scribble on either r3 or ccr.
+ 	 If TIF_NOERROR is set, just save r3 as it is. */
+ 
+-	andi.	r0,r9,_TIF_RESTOREALL
++	andis.	r0,r9,_TIF_RESTOREALL@h
+ 	beq+	0f
+ 	REST_NVGPRS(r1)
+ 	b	2f
+ 0:	cmpld	r3,r11		/* r11 is -MAX_ERRNO */
+ 	blt+	1f
+-	andi.	r0,r9,_TIF_NOERROR
++	andis.	r0,r9,_TIF_NOERROR@h
+ 	bne-	1f
+ 	ld	r5,_CCR(r1)
+ 	neg	r3,r3
+ 	oris	r5,r5,0x1000	/* Set SO bit in CR */
+ 	std	r5,_CCR(r1)
+ 1:	std	r3,GPR3(r1)
+-2:	andi.	r0,r9,(_TIF_PERSYSCALL_MASK)
++2:	andis.	r0,r9,(_TIF_PERSYSCALL_MASK)@h
+ 	beq	4f
+ 
+ 	/* Clear per-syscall TIF flags if any are set.  */
+ 
+-	li	r11,_TIF_PERSYSCALL_MASK
++	lis	r11,(_TIF_PERSYSCALL_MASK)@h
+ 	addi	r12,r12,TI_FLAGS
+ 3:	ldarx	r10,0,r12
+ 	andc	r10,r10,r11
+@@ -774,7 +776,7 @@ _GLOBAL(ret_from_except_lite)
+ 	bl	restore_math
+ 	b	restore
+ #endif
+-1:	andi.	r0,r4,_TIF_NEED_RESCHED
++1:	andi.	r0,r4,_TIF_NEED_RESCHED_MASK
+ 	beq	2f
+ 	bl	restore_interrupts
+ 	SCHEDULE_USER
+@@ -836,10 +838,18 @@ resume_kernel:
+ 
+ #ifdef CONFIG_PREEMPT
+ 	/* Check if we need to preempt */
++	lwz	r8,TI_PREEMPT(r9)
++	cmpwi	0,r8,0		/* if non-zero, just restore regs and return */
++	bne	restore
+ 	andi.	r0,r4,_TIF_NEED_RESCHED
++	bne+	check_count
++
++	andi.	r0,r4,_TIF_NEED_RESCHED_LAZY
+ 	beq+	restore
++	lwz	r8,TI_PREEMPT_LAZY(r9)
++
+ 	/* Check that preempt_count() == 0 and interrupts are enabled */
+-	lwz	r8,TI_PREEMPT(r9)
++check_count:
+ 	cmpwi	cr0,r8,0
+ 	bne	restore
+ 	ld	r0,SOFTE(r1)
+@@ -856,7 +866,7 @@ resume_kernel:
+ 	/* Re-test flags and eventually loop */
+ 	CURRENT_THREAD_INFO(r9, r1)
+ 	ld	r4,TI_FLAGS(r9)
+-	andi.	r0,r4,_TIF_NEED_RESCHED
++	andi.	r0,r4,_TIF_NEED_RESCHED_MASK
+ 	bne	1b
+ 
+ 	/*
+--- arch/powerpc/kernel/irq.c
++++ arch/powerpc/kernel/irq.c
+@@ -766,6 +766,7 @@ void irq_ctx_init(void)
+ 	}
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void do_softirq_own_stack(void)
+ {
+ 	struct thread_info *curtp, *irqtp;
+--- arch/powerpc/kernel/misc_32.S
++++ arch/powerpc/kernel/misc_32.S
+@@ -42,6 +42,7 @@
+  * We store the saved ksp_limit in the unused part
+  * of the STACK_FRAME_OVERHEAD
+  */
++#ifndef CONFIG_PREEMPT_RT_FULL
+ _GLOBAL(call_do_softirq)
+ 	mflr	r0
+ 	stw	r0,4(r1)
+@@ -58,6 +59,7 @@ _GLOBAL(call_do_softirq)
+ 	stw	r10,THREAD+KSP_LIMIT(r2)
+ 	mtlr	r0
+ 	blr
++#endif
+ 
+ /*
+  * void call_do_irq(struct pt_regs *regs, struct thread_info *irqtp);
+--- arch/powerpc/kernel/misc_64.S
++++ arch/powerpc/kernel/misc_64.S
+@@ -32,6 +32,7 @@
+ 
+ 	.text
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ _GLOBAL(call_do_softirq)
+ 	mflr	r0
+ 	std	r0,16(r1)
+@@ -42,6 +43,7 @@ _GLOBAL(call_do_softirq)
+ 	ld	r0,16(r1)
+ 	mtlr	r0
+ 	blr
++#endif
+ 
+ _GLOBAL(call_do_irq)
+ 	mflr	r0
+--- arch/powerpc/kvm/Kconfig
++++ arch/powerpc/kvm/Kconfig
+@@ -178,6 +178,7 @@ config KVM_E500MC
+ config KVM_MPIC
+ 	bool "KVM in-kernel MPIC emulation"
+ 	depends on KVM && E500
++	depends on !PREEMPT_RT_FULL
+ 	select HAVE_KVM_IRQCHIP
+ 	select HAVE_KVM_IRQFD
+ 	select HAVE_KVM_IRQ_ROUTING
+--- arch/powerpc/platforms/cell/spufs/sched.c
++++ arch/powerpc/platforms/cell/spufs/sched.c
+@@ -141,7 +141,7 @@ void __spu_update_sched_info(struct spu_context *ctx)
+ 	 * runqueue. The context will be rescheduled on the proper node
+ 	 * if it is timesliced or preempted.
+ 	 */
+-	cpumask_copy(&ctx->cpus_allowed, &current->cpus_allowed);
++	cpumask_copy(&ctx->cpus_allowed, current->cpus_ptr);
+ 
+ 	/* Save the current cpu id for spu interrupt routing. */
+ 	ctx->last_ran = raw_smp_processor_id();
+--- arch/powerpc/platforms/ps3/device-init.c
++++ arch/powerpc/platforms/ps3/device-init.c
+@@ -752,8 +752,8 @@ static int ps3_notification_read_write(struct ps3_notification_device *dev,
+ 	}
+ 	pr_debug("%s:%u: notification %s issued\n", __func__, __LINE__, op);
+ 
+-	res = wait_event_interruptible(dev->done.wait,
+-				       dev->done.done || kthread_should_stop());
++	res = swait_event_interruptible_exclusive(dev->done.wait,
++						  dev->done.done || kthread_should_stop());
+ 	if (kthread_should_stop())
+ 		res = -EINTR;
+ 	if (res) {
+--- arch/powerpc/platforms/pseries/iommu.c
++++ arch/powerpc/platforms/pseries/iommu.c
+@@ -38,6 +38,7 @@
+ #include <linux/of.h>
+ #include <linux/iommu.h>
+ #include <linux/rculist.h>
++#include <linux/locallock.h>
+ #include <asm/io.h>
+ #include <asm/prom.h>
+ #include <asm/rtas.h>
+@@ -212,6 +213,7 @@ static int tce_build_pSeriesLP(unsigned long liobn, long tcenum, long tceshift,
+ }
+ 
+ static DEFINE_PER_CPU(__be64 *, tce_page);
++static DEFINE_LOCAL_IRQ_LOCK(tcp_page_lock);
+ 
+ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
+ 				     long npages, unsigned long uaddr,
+@@ -233,7 +235,8 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
+ 		                           direction, attrs);
+ 	}
+ 
+-	local_irq_save(flags);	/* to protect tcep and the page behind it */
++	/* to protect tcep and the page behind it */
++	local_lock_irqsave(tcp_page_lock, flags);
+ 
+ 	tcep = __this_cpu_read(tce_page);
+ 
+@@ -244,7 +247,7 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
+ 		tcep = (__be64 *)__get_free_page(GFP_ATOMIC);
+ 		/* If allocation fails, fall back to the loop implementation */
+ 		if (!tcep) {
+-			local_irq_restore(flags);
++			local_unlock_irqrestore(tcp_page_lock, flags);
+ 			return tce_build_pSeriesLP(tbl->it_index, tcenum,
+ 					tbl->it_page_shift,
+ 					npages, uaddr, direction, attrs);
+@@ -279,7 +282,7 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
+ 		tcenum += limit;
+ 	} while (npages > 0 && !rc);
+ 
+-	local_irq_restore(flags);
++	local_unlock_irqrestore(tcp_page_lock, flags);
+ 
+ 	if (unlikely(rc == H_NOT_ENOUGH_RESOURCES)) {
+ 		ret = (int)rc;
+@@ -450,13 +453,14 @@ static int tce_setrange_multi_pSeriesLP(unsigned long start_pfn,
+ 				DMA_BIDIRECTIONAL, 0);
+ 	}
+ 
+-	local_irq_disable();	/* to protect tcep and the page behind it */
++	/* to protect tcep and the page behind it */
++	local_lock_irq(tcp_page_lock);
+ 	tcep = __this_cpu_read(tce_page);
+ 
+ 	if (!tcep) {
+ 		tcep = (__be64 *)__get_free_page(GFP_ATOMIC);
+ 		if (!tcep) {
+-			local_irq_enable();
++			local_unlock_irq(tcp_page_lock);
+ 			return -ENOMEM;
+ 		}
+ 		__this_cpu_write(tce_page, tcep);
+@@ -502,7 +506,7 @@ static int tce_setrange_multi_pSeriesLP(unsigned long start_pfn,
+ 
+ 	/* error cleanup: caller will clear whole range */
+ 
+-	local_irq_enable();
++	local_unlock_irq(tcp_page_lock);
+ 	return rc;
+ }
+ 
+--- arch/s390/include/asm/spinlock_types.h
++++ arch/s390/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef __ASM_SPINLOCK_TYPES_H
+ #define __ASM_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	int lock;
+ } __attribute__ ((aligned (4))) arch_spinlock_t;
+--- arch/sh/include/asm/spinlock_types.h
++++ arch/sh/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef __ASM_SH_SPINLOCK_TYPES_H
+ #define __ASM_SH_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int lock;
+ } arch_spinlock_t;
+--- arch/sh/kernel/irq.c
++++ arch/sh/kernel/irq.c
+@@ -148,6 +148,7 @@ void irq_ctx_exit(int cpu)
+ 	hardirq_ctx[cpu] = NULL;
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void do_softirq_own_stack(void)
+ {
+ 	struct thread_info *curctx;
+@@ -175,6 +176,7 @@ void do_softirq_own_stack(void)
+ 		  "r5", "r6", "r7", "r8", "r9", "r15", "t", "pr"
+ 	);
+ }
++#endif
+ #else
+ static inline void handle_one_irq(unsigned int irq)
+ {
+--- arch/sparc/kernel/irq_64.c
++++ arch/sparc/kernel/irq_64.c
+@@ -854,6 +854,7 @@ void __irq_entry handler_irq(int pil, struct pt_regs *regs)
+ 	set_irq_regs(old_regs);
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void do_softirq_own_stack(void)
+ {
+ 	void *orig_sp, *sp = softirq_stack[smp_processor_id()];
+--- arch/x86/Kconfig
++++ arch/x86/Kconfig
+@@ -180,6 +180,7 @@ config X86
+ 	select HAVE_HARDLOCKUP_DETECTOR_PERF	if PERF_EVENTS && HAVE_PERF_EVENTS_NMI
+ 	select HAVE_PERF_REGS
+ 	select HAVE_PERF_USER_STACK_DUMP
++	select HAVE_PREEMPT_LAZY
+ 	select HAVE_RCU_TABLE_FREE		if PARAVIRT
+ 	select HAVE_RCU_TABLE_INVALIDATE	if HAVE_RCU_TABLE_FREE
+ 	select HAVE_REGS_AND_STACK_ACCESS_API
+@@ -264,8 +265,11 @@ config ARCH_MAY_HAVE_PC_FDC
+ 	def_bool y
+ 	depends on ISA_DMA_API
+ 
++config RWSEM_GENERIC_SPINLOCK
++	def_bool PREEMPT_RT_FULL
++
+ config RWSEM_XCHGADD_ALGORITHM
+-	def_bool y
++	def_bool !RWSEM_GENERIC_SPINLOCK && !PREEMPT_RT_FULL
+ 
+ config GENERIC_CALIBRATE_DELAY
+ 	def_bool y
+@@ -934,7 +938,7 @@ config CALGARY_IOMMU_ENABLED_BY_DEFAULT
+ config MAXSMP
+ 	bool "Enable Maximum number of SMP Processors and NUMA Nodes"
+ 	depends on X86_64 && SMP && DEBUG_KERNEL
+-	select CPUMASK_OFFSTACK
++	select CPUMASK_OFFSTACK if !PREEMPT_RT_FULL
+ 	---help---
+ 	  Enable maximum number of CPUS and NUMA Nodes for this architecture.
+ 	  If unsure, say N.
+--- arch/x86/crypto/aesni-intel_glue.c
++++ arch/x86/crypto/aesni-intel_glue.c
+@@ -434,14 +434,14 @@ static int ecb_encrypt(struct skcipher_request *req)
+ 
+ 	err = skcipher_walk_virt(&walk, req, true);
+ 
+-	kernel_fpu_begin();
+ 	while ((nbytes = walk.nbytes)) {
++		kernel_fpu_begin();
+ 		aesni_ecb_enc(ctx, walk.dst.virt.addr, walk.src.virt.addr,
+ 			      nbytes & AES_BLOCK_MASK);
++		kernel_fpu_end();
+ 		nbytes &= AES_BLOCK_SIZE - 1;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-	kernel_fpu_end();
+ 
+ 	return err;
+ }
+@@ -456,14 +456,14 @@ static int ecb_decrypt(struct skcipher_request *req)
+ 
+ 	err = skcipher_walk_virt(&walk, req, true);
+ 
+-	kernel_fpu_begin();
+ 	while ((nbytes = walk.nbytes)) {
++		kernel_fpu_begin();
+ 		aesni_ecb_dec(ctx, walk.dst.virt.addr, walk.src.virt.addr,
+ 			      nbytes & AES_BLOCK_MASK);
++		kernel_fpu_end();
+ 		nbytes &= AES_BLOCK_SIZE - 1;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-	kernel_fpu_end();
+ 
+ 	return err;
+ }
+@@ -478,14 +478,14 @@ static int cbc_encrypt(struct skcipher_request *req)
+ 
+ 	err = skcipher_walk_virt(&walk, req, true);
+ 
+-	kernel_fpu_begin();
+ 	while ((nbytes = walk.nbytes)) {
++		kernel_fpu_begin();
+ 		aesni_cbc_enc(ctx, walk.dst.virt.addr, walk.src.virt.addr,
+ 			      nbytes & AES_BLOCK_MASK, walk.iv);
++		kernel_fpu_end();
+ 		nbytes &= AES_BLOCK_SIZE - 1;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-	kernel_fpu_end();
+ 
+ 	return err;
+ }
+@@ -500,14 +500,14 @@ static int cbc_decrypt(struct skcipher_request *req)
+ 
+ 	err = skcipher_walk_virt(&walk, req, true);
+ 
+-	kernel_fpu_begin();
+ 	while ((nbytes = walk.nbytes)) {
++		kernel_fpu_begin();
+ 		aesni_cbc_dec(ctx, walk.dst.virt.addr, walk.src.virt.addr,
+ 			      nbytes & AES_BLOCK_MASK, walk.iv);
++		kernel_fpu_end();
+ 		nbytes &= AES_BLOCK_SIZE - 1;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-	kernel_fpu_end();
+ 
+ 	return err;
+ }
+@@ -557,18 +557,20 @@ static int ctr_crypt(struct skcipher_request *req)
+ 
+ 	err = skcipher_walk_virt(&walk, req, true);
+ 
+-	kernel_fpu_begin();
+ 	while ((nbytes = walk.nbytes) >= AES_BLOCK_SIZE) {
++		kernel_fpu_begin();
+ 		aesni_ctr_enc_tfm(ctx, walk.dst.virt.addr, walk.src.virt.addr,
+ 			              nbytes & AES_BLOCK_MASK, walk.iv);
++		kernel_fpu_end();
+ 		nbytes &= AES_BLOCK_SIZE - 1;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+ 	if (walk.nbytes) {
++		kernel_fpu_begin();
+ 		ctr_crypt_final(ctx, &walk);
++		kernel_fpu_end();
+ 		err = skcipher_walk_done(&walk, 0);
+ 	}
+-	kernel_fpu_end();
+ 
+ 	return err;
+ }
+--- arch/x86/crypto/cast5_avx_glue.c
++++ arch/x86/crypto/cast5_avx_glue.c
+@@ -61,7 +61,7 @@ static inline void cast5_fpu_end(bool fpu_enabled)
+ 
+ static int ecb_crypt(struct skcipher_request *req, bool enc)
+ {
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+ 	struct cast5_ctx *ctx = crypto_skcipher_ctx(tfm);
+ 	struct skcipher_walk walk;
+@@ -76,7 +76,7 @@ static int ecb_crypt(struct skcipher_request *req, bool enc)
+ 		u8 *wsrc = walk.src.virt.addr;
+ 		u8 *wdst = walk.dst.virt.addr;
+ 
+-		fpu_enabled = cast5_fpu_begin(fpu_enabled, &walk, nbytes);
++		fpu_enabled = cast5_fpu_begin(false, &walk, nbytes);
+ 
+ 		/* Process multi-block batch */
+ 		if (nbytes >= bsize * CAST5_PARALLEL_BLOCKS) {
+@@ -105,10 +105,9 @@ static int ecb_crypt(struct skcipher_request *req, bool enc)
+ 		} while (nbytes >= bsize);
+ 
+ done:
++		cast5_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-
+-	cast5_fpu_end(fpu_enabled);
+ 	return err;
+ }
+ 
+@@ -212,7 +211,7 @@ static int cbc_decrypt(struct skcipher_request *req)
+ {
+ 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+ 	struct cast5_ctx *ctx = crypto_skcipher_ctx(tfm);
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	struct skcipher_walk walk;
+ 	unsigned int nbytes;
+ 	int err;
+@@ -220,12 +219,11 @@ static int cbc_decrypt(struct skcipher_request *req)
+ 	err = skcipher_walk_virt(&walk, req, false);
+ 
+ 	while ((nbytes = walk.nbytes)) {
+-		fpu_enabled = cast5_fpu_begin(fpu_enabled, &walk, nbytes);
++		fpu_enabled = cast5_fpu_begin(false, &walk, nbytes);
+ 		nbytes = __cbc_decrypt(ctx, &walk);
++		cast5_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-
+-	cast5_fpu_end(fpu_enabled);
+ 	return err;
+ }
+ 
+@@ -292,7 +290,7 @@ static int ctr_crypt(struct skcipher_request *req)
+ {
+ 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+ 	struct cast5_ctx *ctx = crypto_skcipher_ctx(tfm);
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	struct skcipher_walk walk;
+ 	unsigned int nbytes;
+ 	int err;
+@@ -300,13 +298,12 @@ static int ctr_crypt(struct skcipher_request *req)
+ 	err = skcipher_walk_virt(&walk, req, false);
+ 
+ 	while ((nbytes = walk.nbytes) >= CAST5_BLOCK_SIZE) {
+-		fpu_enabled = cast5_fpu_begin(fpu_enabled, &walk, nbytes);
++		fpu_enabled = cast5_fpu_begin(false, &walk, nbytes);
+ 		nbytes = __ctr_crypt(&walk, ctx);
++		cast5_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+ 
+-	cast5_fpu_end(fpu_enabled);
+-
+ 	if (walk.nbytes) {
+ 		ctr_crypt_final(&walk, ctx);
+ 		err = skcipher_walk_done(&walk, 0);
+--- arch/x86/crypto/chacha20_glue.c
++++ arch/x86/crypto/chacha20_glue.c
+@@ -81,23 +81,24 @@ static int chacha20_simd(struct skcipher_request *req)
+ 
+ 	crypto_chacha20_init(state, ctx, walk.iv);
+ 
+-	kernel_fpu_begin();
+-
+ 	while (walk.nbytes >= CHACHA20_BLOCK_SIZE) {
++		kernel_fpu_begin();
++
+ 		chacha20_dosimd(state, walk.dst.virt.addr, walk.src.virt.addr,
+ 				rounddown(walk.nbytes, CHACHA20_BLOCK_SIZE));
++		kernel_fpu_end();
+ 		err = skcipher_walk_done(&walk,
+ 					 walk.nbytes % CHACHA20_BLOCK_SIZE);
+ 	}
+ 
+ 	if (walk.nbytes) {
++		kernel_fpu_begin();
+ 		chacha20_dosimd(state, walk.dst.virt.addr, walk.src.virt.addr,
+ 				walk.nbytes);
++		kernel_fpu_end();
+ 		err = skcipher_walk_done(&walk, 0);
+ 	}
+ 
+-	kernel_fpu_end();
+-
+ 	return err;
+ }
+ 
+--- arch/x86/crypto/glue_helper.c
++++ arch/x86/crypto/glue_helper.c
+@@ -38,7 +38,7 @@ int glue_ecb_req_128bit(const struct common_glue_ctx *gctx,
+ 	void *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
+ 	const unsigned int bsize = 128 / 8;
+ 	struct skcipher_walk walk;
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	unsigned int nbytes;
+ 	int err;
+ 
+@@ -51,7 +51,7 @@ int glue_ecb_req_128bit(const struct common_glue_ctx *gctx,
+ 		unsigned int i;
+ 
+ 		fpu_enabled = glue_fpu_begin(bsize, gctx->fpu_blocks_limit,
+-					     &walk, fpu_enabled, nbytes);
++					     &walk, false, nbytes);
+ 		for (i = 0; i < gctx->num_funcs; i++) {
+ 			func_bytes = bsize * gctx->funcs[i].num_blocks;
+ 
+@@ -69,10 +69,9 @@ int glue_ecb_req_128bit(const struct common_glue_ctx *gctx,
+ 			if (nbytes < bsize)
+ 				break;
+ 		}
++		glue_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+-
+-	glue_fpu_end(fpu_enabled);
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(glue_ecb_req_128bit);
+@@ -115,7 +114,7 @@ int glue_cbc_decrypt_req_128bit(const struct common_glue_ctx *gctx,
+ 	void *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
+ 	const unsigned int bsize = 128 / 8;
+ 	struct skcipher_walk walk;
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	unsigned int nbytes;
+ 	int err;
+ 
+@@ -129,7 +128,7 @@ int glue_cbc_decrypt_req_128bit(const struct common_glue_ctx *gctx,
+ 		u128 last_iv;
+ 
+ 		fpu_enabled = glue_fpu_begin(bsize, gctx->fpu_blocks_limit,
+-					     &walk, fpu_enabled, nbytes);
++					     &walk, false, nbytes);
+ 		/* Start of the last block. */
+ 		src += nbytes / bsize - 1;
+ 		dst += nbytes / bsize - 1;
+@@ -161,10 +160,10 @@ int glue_cbc_decrypt_req_128bit(const struct common_glue_ctx *gctx,
+ done:
+ 		u128_xor(dst, dst, (u128 *)walk.iv);
+ 		*(u128 *)walk.iv = last_iv;
++		glue_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+ 
+-	glue_fpu_end(fpu_enabled);
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(glue_cbc_decrypt_req_128bit);
+@@ -175,7 +174,7 @@ int glue_ctr_req_128bit(const struct common_glue_ctx *gctx,
+ 	void *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
+ 	const unsigned int bsize = 128 / 8;
+ 	struct skcipher_walk walk;
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	unsigned int nbytes;
+ 	int err;
+ 
+@@ -189,7 +188,7 @@ int glue_ctr_req_128bit(const struct common_glue_ctx *gctx,
+ 		le128 ctrblk;
+ 
+ 		fpu_enabled = glue_fpu_begin(bsize, gctx->fpu_blocks_limit,
+-					     &walk, fpu_enabled, nbytes);
++					     &walk, false, nbytes);
+ 
+ 		be128_to_le128(&ctrblk, (be128 *)walk.iv);
+ 
+@@ -213,11 +212,10 @@ int glue_ctr_req_128bit(const struct common_glue_ctx *gctx,
+ 		}
+ 
+ 		le128_to_be128((be128 *)walk.iv, &ctrblk);
++		glue_fpu_end(fpu_enabled);
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 	}
+ 
+-	glue_fpu_end(fpu_enabled);
+-
+ 	if (nbytes) {
+ 		le128 ctrblk;
+ 		u128 tmp;
+@@ -278,7 +276,7 @@ int glue_xts_req_128bit(const struct common_glue_ctx *gctx,
+ {
+ 	const unsigned int bsize = 128 / 8;
+ 	struct skcipher_walk walk;
+-	bool fpu_enabled = false;
++	bool fpu_enabled;
+ 	unsigned int nbytes;
+ 	int err;
+ 
+@@ -289,21 +287,24 @@ int glue_xts_req_128bit(const struct common_glue_ctx *gctx,
+ 
+ 	/* set minimum length to bsize, for tweak_fn */
+ 	fpu_enabled = glue_fpu_begin(bsize, gctx->fpu_blocks_limit,
+-				     &walk, fpu_enabled,
++				     &walk, false,
+ 				     nbytes < bsize ? bsize : nbytes);
+ 
+ 	/* calculate first value of T */
+ 	tweak_fn(tweak_ctx, walk.iv, walk.iv);
+ 
+ 	while (nbytes) {
++		fpu_enabled = glue_fpu_begin(bsize, gctx->fpu_blocks_limit,
++					     &walk, fpu_enabled,
++					     nbytes < bsize ? bsize : nbytes);
+ 		nbytes = __glue_xts_req_128bit(gctx, crypt_ctx, &walk);
+ 
++		glue_fpu_end(fpu_enabled);
++		fpu_enabled = false;
+ 		err = skcipher_walk_done(&walk, nbytes);
+ 		nbytes = walk.nbytes;
+ 	}
+ 
+-	glue_fpu_end(fpu_enabled);
+-
+ 	return err;
+ }
+ EXPORT_SYMBOL_GPL(glue_xts_req_128bit);
+--- arch/x86/entry/common.c
++++ arch/x86/entry/common.c
+@@ -134,7 +134,7 @@ static long syscall_trace_enter(struct pt_regs *regs)
+ 
+ #define EXIT_TO_USERMODE_LOOP_FLAGS				\
+ 	(_TIF_SIGPENDING | _TIF_NOTIFY_RESUME | _TIF_UPROBE |	\
+-	 _TIF_NEED_RESCHED | _TIF_USER_RETURN_NOTIFY | _TIF_PATCH_PENDING)
++	 _TIF_NEED_RESCHED_MASK | _TIF_USER_RETURN_NOTIFY | _TIF_PATCH_PENDING)
+ 
+ static void exit_to_usermode_loop(struct pt_regs *regs, u32 cached_flags)
+ {
+@@ -149,9 +149,16 @@ static void exit_to_usermode_loop(struct pt_regs *regs, u32 cached_flags)
+ 		/* We have work to do. */
+ 		local_irq_enable();
+ 
+-		if (cached_flags & _TIF_NEED_RESCHED)
++		if (cached_flags & _TIF_NEED_RESCHED_MASK)
+ 			schedule();
+ 
++#ifdef ARCH_RT_DELAYS_SIGNAL_SEND
++		if (unlikely(current->forced_info.si_signo)) {
++			struct task_struct *t = current;
++			force_sig_info(t->forced_info.si_signo, &t->forced_info, t);
++			t->forced_info.si_signo = 0;
++		}
++#endif
+ 		if (cached_flags & _TIF_UPROBE)
+ 			uprobe_notify_resume(regs);
+ 
+--- arch/x86/entry/entry_32.S
++++ arch/x86/entry/entry_32.S
+@@ -750,8 +750,25 @@ END(ret_from_exception)
+ ENTRY(resume_kernel)
+ 	DISABLE_INTERRUPTS(CLBR_ANY)
+ .Lneed_resched:
++	# preempt count == 0 + NEED_RS set?
+ 	cmpl	$0, PER_CPU_VAR(__preempt_count)
++#ifndef CONFIG_PREEMPT_LAZY
+ 	jnz	restore_all_kernel
++#else
++	jz	test_int_off
++
++	# atleast preempt count == 0 ?
++	cmpl $_PREEMPT_ENABLED,PER_CPU_VAR(__preempt_count)
++	jne	restore_all_kernel
++
++	movl	PER_CPU_VAR(current_task), %ebp
++	cmpl	$0,TASK_TI_preempt_lazy_count(%ebp)	# non-zero preempt_lazy_count ?
++	jnz	restore_all_kernel
++
++	testl	$_TIF_NEED_RESCHED_LAZY, TASK_TI_flags(%ebp)
++	jz	restore_all_kernel
++test_int_off:
++#endif
+ 	testl	$X86_EFLAGS_IF, PT_EFLAGS(%esp)	# interrupts off (exception path) ?
+ 	jz	restore_all_kernel
+ 	call	preempt_schedule_irq
+--- arch/x86/entry/entry_64.S
++++ arch/x86/entry/entry_64.S
+@@ -733,7 +733,23 @@ retint_kernel:
+ 	btl	$9, EFLAGS(%rsp)		/* were interrupts off? */
+ 	jnc	1f
+ 0:	cmpl	$0, PER_CPU_VAR(__preempt_count)
++#ifndef CONFIG_PREEMPT_LAZY
+ 	jnz	1f
++#else
++	jz	do_preempt_schedule_irq
++
++	# atleast preempt count == 0 ?
++	cmpl $_PREEMPT_ENABLED,PER_CPU_VAR(__preempt_count)
++	jnz	1f
++
++	movq	PER_CPU_VAR(current_task), %rcx
++	cmpl	$0, TASK_TI_preempt_lazy_count(%rcx)
++	jnz	1f
++
++	btl	$TIF_NEED_RESCHED_LAZY,TASK_TI_flags(%rcx)
++	jnc	1f
++do_preempt_schedule_irq:
++#endif
+ 	call	preempt_schedule_irq
+ 	jmp	0b
+ 1:
+@@ -1084,6 +1100,7 @@ bad_gs:
+ 	jmp	2b
+ 	.previous
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ /* Call softirq on interrupt stack. Interrupts are off. */
+ ENTRY(do_softirq_own_stack)
+ 	pushq	%rbp
+@@ -1094,6 +1111,7 @@ ENTRY(do_softirq_own_stack)
+ 	leaveq
+ 	ret
+ ENDPROC(do_softirq_own_stack)
++#endif
+ 
+ #ifdef CONFIG_XEN
+ idtentry hypervisor_callback xen_do_hypervisor_callback has_error_code=0
+--- arch/x86/include/asm/fpu/api.h
++++ arch/x86/include/asm/fpu/api.h
+@@ -20,6 +20,7 @@
+  */
+ extern void kernel_fpu_begin(void);
+ extern void kernel_fpu_end(void);
++extern void kernel_fpu_resched(void);
+ extern bool irq_fpu_usable(void);
+ 
+ /*
+--- arch/x86/include/asm/preempt.h
++++ arch/x86/include/asm/preempt.h
+@@ -86,17 +86,48 @@ static __always_inline void __preempt_count_sub(int val)
+  * a decrement which hits zero means we have no preempt_count and should
+  * reschedule.
+  */
+-static __always_inline bool __preempt_count_dec_and_test(void)
++static __always_inline bool ____preempt_count_dec_and_test(void)
+ {
+ 	GEN_UNARY_RMWcc("decl", __preempt_count, __percpu_arg(0), e);
+ }
+ 
++static __always_inline bool __preempt_count_dec_and_test(void)
++{
++	if (____preempt_count_dec_and_test())
++		return true;
++#ifdef CONFIG_PREEMPT_LAZY
++	if (preempt_count())
++		return false;
++	if (current_thread_info()->preempt_lazy_count)
++		return false;
++	return test_thread_flag(TIF_NEED_RESCHED_LAZY);
++#else
++	return false;
++#endif
++}
++
+ /*
+  * Returns true when we need to resched and can (barring IRQ state).
+  */
+ static __always_inline bool should_resched(int preempt_offset)
+ {
++#ifdef CONFIG_PREEMPT_LAZY
++	u32 tmp;
++
++	tmp = raw_cpu_read_4(__preempt_count);
++	if (tmp == preempt_offset)
++		return true;
++
++	/* preempt count == 0 ? */
++	tmp &= ~PREEMPT_NEED_RESCHED;
++	if (tmp != preempt_offset)
++		return false;
++	if (current_thread_info()->preempt_lazy_count)
++		return false;
++	return test_thread_flag(TIF_NEED_RESCHED_LAZY);
++#else
+ 	return unlikely(raw_cpu_read_4(__preempt_count) == preempt_offset);
++#endif
+ }
+ 
+ #ifdef CONFIG_PREEMPT
+--- arch/x86/include/asm/signal.h
++++ arch/x86/include/asm/signal.h
+@@ -28,6 +28,19 @@ typedef struct {
+ #define SA_IA32_ABI	0x02000000u
+ #define SA_X32_ABI	0x01000000u
+ 
++/*
++ * Because some traps use the IST stack, we must keep preemption
++ * disabled while calling do_trap(), but do_trap() may call
++ * force_sig_info() which will grab the signal spin_locks for the
++ * task, which in PREEMPT_RT_FULL are mutexes.  By defining
++ * ARCH_RT_DELAYS_SIGNAL_SEND the force_sig_info() will set
++ * TIF_NOTIFY_RESUME and set up the signal to be sent on exit of the
++ * trap.
++ */
++#if defined(CONFIG_PREEMPT_RT_FULL)
++#define ARCH_RT_DELAYS_SIGNAL_SEND
++#endif
++
+ #ifndef CONFIG_COMPAT
+ typedef sigset_t compat_sigset_t;
+ #endif
+--- arch/x86/include/asm/stackprotector.h
++++ arch/x86/include/asm/stackprotector.h
+@@ -65,7 +65,7 @@
+  */
+ static __always_inline void boot_init_stack_canary(void)
+ {
+-	u64 canary;
++	u64 uninitialized_var(canary);
+ 	u64 tsc;
+ 
+ #ifdef CONFIG_X86_64
+@@ -76,8 +76,14 @@ static __always_inline void boot_init_stack_canary(void)
+ 	 * of randomness. The TSC only matters for very early init,
+ 	 * there it already has some randomness on most systems. Later
+ 	 * on during the bootup the random pool has true entropy too.
++	 * For preempt-rt we need to weaken the randomness a bit, as
++	 * we can't call into the random generator from atomic context
++	 * due to locking constraints. We just leave canary
++	 * uninitialized and use the TSC based randomness on top of it.
+ 	 */
++#ifndef CONFIG_PREEMPT_RT_FULL
+ 	get_random_bytes(&canary, sizeof(canary));
++#endif
+ 	tsc = rdtsc();
+ 	canary += tsc + (tsc << 32UL);
+ 	canary &= CANARY_MASK;
+--- arch/x86/include/asm/thread_info.h
++++ arch/x86/include/asm/thread_info.h
+@@ -56,17 +56,24 @@ struct task_struct;
+ struct thread_info {
+ 	unsigned long		flags;		/* low level flags */
+ 	u32			status;		/* thread synchronous flags */
++	int			preempt_lazy_count;	/* 0 => lazy preemptable
++							  <0 => BUG */
+ };
+ 
+ #define INIT_THREAD_INFO(tsk)			\
+ {						\
+ 	.flags		= 0,			\
++	.preempt_lazy_count = 0,		\
+ }
+ 
+ #else /* !__ASSEMBLY__ */
+ 
+ #include <asm/asm-offsets.h>
+ 
++#define GET_THREAD_INFO(reg) \
++	_ASM_MOV PER_CPU_VAR(cpu_current_top_of_stack),reg ; \
++	_ASM_SUB $(THREAD_SIZE),reg ;
++
+ #endif
+ 
+ /*
+@@ -91,6 +98,7 @@ struct thread_info {
+ #define TIF_NOCPUID		15	/* CPUID is not accessible in userland */
+ #define TIF_NOTSC		16	/* TSC is not accessible in userland */
+ #define TIF_IA32		17	/* IA32 compatibility process */
++#define TIF_NEED_RESCHED_LAZY	18	/* lazy rescheduling necessary */
+ #define TIF_NOHZ		19	/* in adaptive nohz mode */
+ #define TIF_MEMDIE		20	/* is terminating due to OOM killer */
+ #define TIF_POLLING_NRFLAG	21	/* idle is polling for TIF_NEED_RESCHED */
+@@ -120,6 +128,7 @@ struct thread_info {
+ #define _TIF_NOCPUID		(1 << TIF_NOCPUID)
+ #define _TIF_NOTSC		(1 << TIF_NOTSC)
+ #define _TIF_IA32		(1 << TIF_IA32)
++#define _TIF_NEED_RESCHED_LAZY	(1 << TIF_NEED_RESCHED_LAZY)
+ #define _TIF_NOHZ		(1 << TIF_NOHZ)
+ #define _TIF_POLLING_NRFLAG	(1 << TIF_POLLING_NRFLAG)
+ #define _TIF_IO_BITMAP		(1 << TIF_IO_BITMAP)
+@@ -165,6 +174,8 @@ struct thread_info {
+ #define _TIF_WORK_CTXSW_PREV (_TIF_WORK_CTXSW|_TIF_USER_RETURN_NOTIFY)
+ #define _TIF_WORK_CTXSW_NEXT (_TIF_WORK_CTXSW)
+ 
++#define _TIF_NEED_RESCHED_MASK	(_TIF_NEED_RESCHED | _TIF_NEED_RESCHED_LAZY)
++
+ #define STACK_WARN		(THREAD_SIZE/8)
+ 
+ /*
+--- arch/x86/kernel/apic/io_apic.c
++++ arch/x86/kernel/apic/io_apic.c
+@@ -1722,7 +1722,7 @@ static bool io_apic_level_ack_pending(struct mp_chip_data *data)
+ 	return false;
+ }
+ 
+-static inline bool ioapic_irqd_mask(struct irq_data *data)
++static inline bool ioapic_prepare_move(struct irq_data *data)
+ {
+ 	/* If we are moving the IRQ we need to mask it */
+ 	if (unlikely(irqd_is_setaffinity_pending(data))) {
+@@ -1733,9 +1733,9 @@ static inline bool ioapic_irqd_mask(struct irq_data *data)
+ 	return false;
+ }
+ 
+-static inline void ioapic_irqd_unmask(struct irq_data *data, bool masked)
++static inline void ioapic_finish_move(struct irq_data *data, bool moveit)
+ {
+-	if (unlikely(masked)) {
++	if (unlikely(moveit)) {
+ 		/* Only migrate the irq if the ack has been received.
+ 		 *
+ 		 * On rare occasions the broadcast level triggered ack gets
+@@ -1770,11 +1770,11 @@ static inline void ioapic_irqd_unmask(struct irq_data *data, bool masked)
+ 	}
+ }
+ #else
+-static inline bool ioapic_irqd_mask(struct irq_data *data)
++static inline bool ioapic_prepare_move(struct irq_data *data)
+ {
+ 	return false;
+ }
+-static inline void ioapic_irqd_unmask(struct irq_data *data, bool masked)
++static inline void ioapic_finish_move(struct irq_data *data, bool moveit)
+ {
+ }
+ #endif
+@@ -1783,11 +1783,11 @@ static void ioapic_ack_level(struct irq_data *irq_data)
+ {
+ 	struct irq_cfg *cfg = irqd_cfg(irq_data);
+ 	unsigned long v;
+-	bool masked;
++	bool moveit;
+ 	int i;
+ 
+ 	irq_complete_move(cfg);
+-	masked = ioapic_irqd_mask(irq_data);
++	moveit = ioapic_prepare_move(irq_data);
+ 
+ 	/*
+ 	 * It appears there is an erratum which affects at least version 0x11
+@@ -1842,7 +1842,7 @@ static void ioapic_ack_level(struct irq_data *irq_data)
+ 		eoi_ioapic_pin(cfg->vector, irq_data->chip_data);
+ 	}
+ 
+-	ioapic_irqd_unmask(irq_data, masked);
++	ioapic_finish_move(irq_data, moveit);
+ }
+ 
+ static void ioapic_ir_ack_level(struct irq_data *irq_data)
+--- arch/x86/kernel/asm-offsets.c
++++ arch/x86/kernel/asm-offsets.c
+@@ -38,6 +38,7 @@ void common(void) {
+ 
+ 	BLANK();
+ 	OFFSET(TASK_TI_flags, task_struct, thread_info.flags);
++	OFFSET(TASK_TI_preempt_lazy_count, task_struct, thread_info.preempt_lazy_count);
+ 	OFFSET(TASK_addr_limit, task_struct, thread.addr_limit);
+ 
+ 	BLANK();
+@@ -94,6 +95,7 @@ void common(void) {
+ 
+ 	BLANK();
+ 	DEFINE(PTREGS_SIZE, sizeof(struct pt_regs));
++	DEFINE(_PREEMPT_ENABLED, PREEMPT_ENABLED);
+ 
+ 	/* TLB state for the entry code */
+ 	OFFSET(TLB_STATE_user_pcid_flush_mask, tlb_state, user_pcid_flush_mask);
+--- arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
++++ arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+@@ -1445,7 +1445,7 @@ static int pseudo_lock_dev_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	 * may be scheduled elsewhere and invalidate entries in the
+ 	 * pseudo-locked region.
+ 	 */
+-	if (!cpumask_subset(&current->cpus_allowed, &plr->d->cpu_mask)) {
++	if (!cpumask_subset(current->cpus_ptr, &plr->d->cpu_mask)) {
+ 		mutex_unlock(&rdtgroup_mutex);
+ 		return -EINVAL;
+ 	}
+--- arch/x86/kernel/fpu/signal.c
++++ arch/x86/kernel/fpu/signal.c
+@@ -344,10 +344,12 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
+ 			sanitize_restored_xstate(tsk, &env, xfeatures, fx_only);
+ 		}
+ 
++		preempt_disable();
+ 		local_bh_disable();
+ 		fpu->initialized = 1;
+ 		fpu__restore(fpu);
+ 		local_bh_enable();
++		preempt_enable();
+ 
+ 		return err;
+ 	} else {
+--- arch/x86/kernel/irq_32.c
++++ arch/x86/kernel/irq_32.c
+@@ -130,6 +130,7 @@ void irq_ctx_init(int cpu)
+ 	       cpu, per_cpu(hardirq_stack, cpu),  per_cpu(softirq_stack, cpu));
+ }
+ 
++#ifndef CONFIG_PREEMPT_RT_FULL
+ void do_softirq_own_stack(void)
+ {
+ 	struct irq_stack *irqstk;
+--- arch/x86/kernel/process_32.c
++++ arch/x86/kernel/process_32.c
+@@ -38,6 +38,7 @@
+ #include <linux/io.h>
+ #include <linux/kdebug.h>
+ #include <linux/syscalls.h>
++#include <linux/highmem.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/ldt.h>
+@@ -205,6 +206,35 @@ start_thread(struct pt_regs *regs, unsigned long new_ip, unsigned long new_sp)
+ }
+ EXPORT_SYMBOL_GPL(start_thread);
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++static void switch_kmaps(struct task_struct *prev_p, struct task_struct *next_p)
++{
++	int i;
++
++	/*
++	 * Clear @prev's kmap_atomic mappings
++	 */
++	for (i = 0; i < prev_p->kmap_idx; i++) {
++		int idx = i + KM_TYPE_NR * smp_processor_id();
++		pte_t *ptep = kmap_pte - idx;
++
++		kpte_clear_flush(ptep, __fix_to_virt(FIX_KMAP_BEGIN + idx));
++	}
++	/*
++	 * Restore @next_p's kmap_atomic mappings
++	 */
++	for (i = 0; i < next_p->kmap_idx; i++) {
++		int idx = i + KM_TYPE_NR * smp_processor_id();
++
++		if (!pte_none(next_p->kmap_pte[i]))
++			set_pte(kmap_pte - idx, next_p->kmap_pte[i]);
++	}
++}
++#else
++static inline void
++switch_kmaps(struct task_struct *prev_p, struct task_struct *next_p) { }
++#endif
++
+ 
+ /*
+  *	switch_to(x,y) should switch tasks from x to y.
+--- arch/x86/kvm/lapic.c
++++ arch/x86/kvm/lapic.c
+@@ -2261,7 +2261,7 @@ int kvm_create_lapic(struct kvm_vcpu *vcpu)
+ 	apic->vcpu = vcpu;
+ 
+ 	hrtimer_init(&apic->lapic_timer.timer, CLOCK_MONOTONIC,
+-		     HRTIMER_MODE_ABS_PINNED);
++		     HRTIMER_MODE_ABS_PINNED_HARD);
+ 	apic->lapic_timer.timer.function = apic_timer_fn;
+ 
+ 	/*
+--- arch/x86/kvm/x86.c
++++ arch/x86/kvm/x86.c
+@@ -6850,6 +6850,13 @@ int kvm_arch_init(void *opaque)
+ 		goto out;
+ 	}
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++	if (!boot_cpu_has(X86_FEATURE_CONSTANT_TSC)) {
++		printk(KERN_ERR "RT requires X86_FEATURE_CONSTANT_TSC\n");
++		return -EOPNOTSUPP;
++	}
++#endif
++
+ 	r = kvm_mmu_module_init();
+ 	if (r)
+ 		goto out_free_percpu;
+--- arch/x86/mm/highmem_32.c
++++ arch/x86/mm/highmem_32.c
+@@ -32,10 +32,11 @@ EXPORT_SYMBOL(kunmap);
+  */
+ void *kmap_atomic_prot(struct page *page, pgprot_t prot)
+ {
++	pte_t pte = mk_pte(page, prot);
+ 	unsigned long vaddr;
+ 	int idx, type;
+ 
+-	preempt_disable();
++	preempt_disable_nort();
+ 	pagefault_disable();
+ 
+ 	if (!PageHighMem(page))
+@@ -45,7 +46,10 @@ void *kmap_atomic_prot(struct page *page, pgprot_t prot)
+ 	idx = type + KM_TYPE_NR*smp_processor_id();
+ 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
+ 	BUG_ON(!pte_none(*(kmap_pte-idx)));
+-	set_pte(kmap_pte-idx, mk_pte(page, prot));
++#ifdef CONFIG_PREEMPT_RT_FULL
++	current->kmap_pte[type] = pte;
++#endif
++	set_pte(kmap_pte-idx, pte);
+ 	arch_flush_lazy_mmu_mode();
+ 
+ 	return (void *)vaddr;
+@@ -88,6 +92,9 @@ void __kunmap_atomic(void *kvaddr)
+ 		 * is a bad idea also, in case the page changes cacheability
+ 		 * attributes or becomes a protected page in a hypervisor.
+ 		 */
++#ifdef CONFIG_PREEMPT_RT_FULL
++		current->kmap_pte[type] = __pte(0);
++#endif
+ 		kpte_clear_flush(kmap_pte-idx, vaddr);
+ 		kmap_atomic_idx_pop();
+ 		arch_flush_lazy_mmu_mode();
+@@ -100,7 +107,7 @@ void __kunmap_atomic(void *kvaddr)
+ #endif
+ 
+ 	pagefault_enable();
+-	preempt_enable();
++	preempt_enable_nort();
+ }
+ EXPORT_SYMBOL(__kunmap_atomic);
+ 
+--- arch/x86/mm/iomap_32.c
++++ arch/x86/mm/iomap_32.c
+@@ -59,6 +59,7 @@ EXPORT_SYMBOL_GPL(iomap_free);
+ 
+ void *kmap_atomic_prot_pfn(unsigned long pfn, pgprot_t prot)
+ {
++	pte_t pte = pfn_pte(pfn, prot);
+ 	unsigned long vaddr;
+ 	int idx, type;
+ 
+@@ -68,7 +69,12 @@ void *kmap_atomic_prot_pfn(unsigned long pfn, pgprot_t prot)
+ 	type = kmap_atomic_idx_push();
+ 	idx = type + KM_TYPE_NR * smp_processor_id();
+ 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
+-	set_pte(kmap_pte - idx, pfn_pte(pfn, prot));
++	WARN_ON(!pte_none(*(kmap_pte - idx)));
++
++#ifdef CONFIG_PREEMPT_RT_FULL
++	current->kmap_pte[type] = pte;
++#endif
++	set_pte(kmap_pte - idx, pte);
+ 	arch_flush_lazy_mmu_mode();
+ 
+ 	return (void *)vaddr;
+@@ -119,6 +125,9 @@ iounmap_atomic(void __iomem *kvaddr)
+ 		 * is a bad idea also, in case the page changes cacheability
+ 		 * attributes or becomes a protected page in a hypervisor.
+ 		 */
++#ifdef CONFIG_PREEMPT_RT_FULL
++		current->kmap_pte[type] = __pte(0);
++#endif
+ 		kpte_clear_flush(kmap_pte-idx, vaddr);
+ 		kmap_atomic_idx_pop();
+ 	}
+--- arch/x86/mm/pageattr.c
++++ arch/x86/mm/pageattr.c
+@@ -687,12 +687,18 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
+ 	pgprot_t ref_prot;
+ 
+ 	spin_lock(&pgd_lock);
++	/*
++	 * Keep preemption disabled after __flush_tlb_all() which expects not be
++	 * preempted during the flush of the local TLB.
++	 */
++	preempt_disable();
+ 	/*
+ 	 * Check for races, another CPU might have split this page
+ 	 * up for us already:
+ 	 */
+ 	tmp = _lookup_address_cpa(cpa, address, &level);
+ 	if (tmp != kpte) {
++		preempt_enable();
+ 		spin_unlock(&pgd_lock);
+ 		return 1;
+ 	}
+@@ -726,6 +732,7 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
+ 		break;
+ 
+ 	default:
++		preempt_enable();
+ 		spin_unlock(&pgd_lock);
+ 		return 1;
+ 	}
+@@ -764,6 +771,7 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
+ 	 * going on.
+ 	 */
+ 	__flush_tlb_all();
++	preempt_enable();
+ 	spin_unlock(&pgd_lock);
+ 
+ 	return 0;
+--- arch/x86/platform/efi/efi_64.c
++++ arch/x86/platform/efi/efi_64.c
+@@ -617,18 +617,16 @@ void __init efi_dump_pagetable(void)
+ 
+ /*
+  * Makes the calling thread switch to/from efi_mm context. Can be used
+- * for SetVirtualAddressMap() i.e. current->active_mm == init_mm as well
+- * as during efi runtime calls i.e current->active_mm == current_mm.
+- * We are not mm_dropping()/mm_grabbing() any mm, because we are not
+- * losing/creating any references.
++ * in a kernel thread and user context. Preemption needs to remain disabled
++ * while the EFI-mm is borrowed. mmgrab()/mmdrop() is not used because the mm
++ * can not change under us.
++ * It should be ensured that there are no concurent calls to this function.
+  */
+ void efi_switch_mm(struct mm_struct *mm)
+ {
+-	task_lock(current);
+ 	efi_scratch.prev_mm = current->active_mm;
+ 	current->active_mm = mm;
+ 	switch_mm(efi_scratch.prev_mm, mm, NULL);
+-	task_unlock(current);
+ }
+ 
+ #ifdef CONFIG_EFI_MIXED
+--- arch/xtensa/include/asm/spinlock_types.h
++++ arch/xtensa/include/asm/spinlock_types.h
+@@ -2,10 +2,6 @@
+ #ifndef __ASM_SPINLOCK_TYPES_H
+ #define __ASM_SPINLOCK_TYPES_H
+ 
+-#ifndef __LINUX_SPINLOCK_TYPES_H
+-# error "please don't include this file directly"
+-#endif
+-
+ typedef struct {
+ 	volatile unsigned int slock;
+ } arch_spinlock_t;
+--- block/blk-core.c
++++ block/blk-core.c
+@@ -189,6 +189,9 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
+ 
+ 	INIT_LIST_HEAD(&rq->queuelist);
+ 	INIT_LIST_HEAD(&rq->timeout_list);
++#ifdef CONFIG_PREEMPT_RT_FULL
++	INIT_WORK(&rq->work, __blk_mq_complete_request_remote_work);
++#endif
+ 	rq->cpu = -1;
+ 	rq->q = q;
+ 	rq->__sector = (sector_t) -1;
+@@ -970,12 +973,21 @@ void blk_queue_exit(struct request_queue *q)
+ 	percpu_ref_put(&q->q_usage_counter);
+ }
+ 
++static void blk_queue_usage_counter_release_wrk(struct work_struct *work)
++{
++	struct request_queue *q =
++		container_of(work, struct request_queue, mq_pcpu_wake);
++
++	wake_up_all(&q->mq_freeze_wq);
++}
++
+ static void blk_queue_usage_counter_release(struct percpu_ref *ref)
+ {
+ 	struct request_queue *q =
+ 		container_of(ref, struct request_queue, q_usage_counter);
+ 
+-	wake_up_all(&q->mq_freeze_wq);
++	if (wq_has_sleeper(&q->mq_freeze_wq))
++		schedule_work(&q->mq_pcpu_wake);
+ }
+ 
+ static void blk_rq_timed_out_timer(struct timer_list *t)
+@@ -1074,6 +1086,7 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id,
+ 	queue_flag_set_unlocked(QUEUE_FLAG_BYPASS, q);
+ 
+ 	init_waitqueue_head(&q->mq_freeze_wq);
++	INIT_WORK(&q->mq_pcpu_wake, blk_queue_usage_counter_release_wrk);
+ 
+ 	/*
+ 	 * Init percpu_ref in atomic mode so that it's faster to shutdown.
+--- block/blk-ioc.c
++++ block/blk-ioc.c
+@@ -9,6 +9,7 @@
+ #include <linux/blkdev.h>
+ #include <linux/slab.h>
+ #include <linux/sched/task.h>
++#include <linux/delay.h>
+ 
+ #include "blk.h"
+ 
+@@ -119,7 +120,7 @@ static void ioc_release_fn(struct work_struct *work)
+ 			spin_unlock(q->queue_lock);
+ 		} else {
+ 			spin_unlock_irqrestore(&ioc->lock, flags);
+-			cpu_relax();
++			cpu_chill();
+ 			spin_lock_irqsave_nested(&ioc->lock, flags, 1);
+ 		}
+ 	}
+@@ -203,7 +204,7 @@ void put_io_context_active(struct io_context *ioc)
+ 				spin_unlock(icq->q->queue_lock);
+ 			} else {
+ 				spin_unlock_irqrestore(&ioc->lock, flags);
+-				cpu_relax();
++				cpu_chill();
+ 				goto retry;
+ 			}
+ 		}
+--- block/blk-mq.c
++++ block/blk-mq.c
+@@ -320,6 +320,9 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
+ 	rq->extra_len = 0;
+ 	rq->__deadline = 0;
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++	INIT_WORK(&rq->work, __blk_mq_complete_request_remote_work);
++#endif
+ 	INIT_LIST_HEAD(&rq->timeout_list);
+ 	rq->timeout = 0;
+ 
+@@ -547,12 +550,24 @@ void blk_mq_end_request(struct request *rq, blk_status_t error)
+ }
+ EXPORT_SYMBOL(blk_mq_end_request);
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++
++void __blk_mq_complete_request_remote_work(struct work_struct *work)
++{
++	struct request *rq = container_of(work, struct request, work);
++
++	rq->q->softirq_done_fn(rq);
++}
++
++#else
++
+ static void __blk_mq_complete_request_remote(void *data)
+ {
+ 	struct request *rq = data;
+ 
+ 	rq->q->softirq_done_fn(rq);
+ }
++#endif
+ 
+ static void __blk_mq_complete_request(struct request *rq)
+ {
+@@ -570,19 +585,27 @@ static void __blk_mq_complete_request(struct request *rq)
+ 		return;
+ 	}
+ 
+-	cpu = get_cpu();
++	cpu = get_cpu_light();
+ 	if (!test_bit(QUEUE_FLAG_SAME_FORCE, &rq->q->queue_flags))
+ 		shared = cpus_share_cache(cpu, ctx->cpu);
+ 
+ 	if (cpu != ctx->cpu && !shared && cpu_online(ctx->cpu)) {
++#ifdef CONFIG_PREEMPT_RT_FULL
++		/*
++		 * We could force QUEUE_FLAG_SAME_FORCE then we would not get in
++		 * here. But we could try to invoke it one the CPU like this.
++		 */
++		schedule_work_on(ctx->cpu, &rq->work);
++#else
+ 		rq->csd.func = __blk_mq_complete_request_remote;
+ 		rq->csd.info = rq;
+ 		rq->csd.flags = 0;
+ 		smp_call_function_single_async(ctx->cpu, &rq->csd);
++#endif
+ 	} else {
+ 		rq->q->softirq_done_fn(rq);
+ 	}
+-	put_cpu();
++	put_cpu_light();
+ }
+ 
+ static void hctx_unlock(struct blk_mq_hw_ctx *hctx, int srcu_idx)
+@@ -1380,14 +1403,14 @@ static void __blk_mq_delay_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async,
+ 		return;
+ 
+ 	if (!async && !(hctx->flags & BLK_MQ_F_BLOCKING)) {
+-		int cpu = get_cpu();
++		int cpu = get_cpu_light();
+ 		if (cpumask_test_cpu(cpu, hctx->cpumask)) {
+ 			__blk_mq_run_hw_queue(hctx);
+-			put_cpu();
++			put_cpu_light();
+ 			return;
+ 		}
+ 
+-		put_cpu();
++		put_cpu_light();
+ 	}
+ 
+ 	kblockd_mod_delayed_work_on(blk_mq_hctx_next_cpu(hctx), &hctx->run_work,
+@@ -3137,10 +3160,9 @@ static bool blk_mq_poll_hybrid_sleep(struct request_queue *q,
+ 	kt = nsecs;
+ 
+ 	mode = HRTIMER_MODE_REL;
+-	hrtimer_init_on_stack(&hs.timer, CLOCK_MONOTONIC, mode);
++	hrtimer_init_sleeper_on_stack(&hs, CLOCK_MONOTONIC, mode, current);
+ 	hrtimer_set_expires(&hs.timer, kt);
+ 
+-	hrtimer_init_sleeper(&hs, current);
+ 	do {
+ 		if (blk_mq_rq_state(rq) == MQ_RQ_COMPLETE)
+ 			break;
+--- block/blk-mq.h
++++ block/blk-mq.h
+@@ -113,12 +113,12 @@ static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
+  */
+ static inline struct blk_mq_ctx *blk_mq_get_ctx(struct request_queue *q)
+ {
+-	return __blk_mq_get_ctx(q, get_cpu());
++	return __blk_mq_get_ctx(q, get_cpu_light());
+ }
+ 
+ static inline void blk_mq_put_ctx(struct blk_mq_ctx *ctx)
+ {
+-	put_cpu();
++	put_cpu_light();
+ }
+ 
+ struct blk_mq_alloc_data {
+--- block/blk-softirq.c
++++ block/blk-softirq.c
+@@ -53,6 +53,7 @@ static void trigger_softirq(void *data)
+ 		raise_softirq_irqoff(BLOCK_SOFTIRQ);
+ 
+ 	local_irq_restore(flags);
++	preempt_check_resched_rt();
+ }
+ 
+ /*
+@@ -91,6 +92,7 @@ static int blk_softirq_cpu_dead(unsigned int cpu)
+ 			 this_cpu_ptr(&blk_cpu_done));
+ 	raise_softirq_irqoff(BLOCK_SOFTIRQ);
+ 	local_irq_enable();
++	preempt_check_resched_rt();
+ 
+ 	return 0;
+ }
+@@ -143,6 +145,7 @@ void __blk_complete_request(struct request *req)
+ 		goto do_local;
+ 
+ 	local_irq_restore(flags);
++	preempt_check_resched_rt();
+ }
+ EXPORT_SYMBOL(__blk_complete_request);
+ 
+--- crypto/cryptd.c
++++ crypto/cryptd.c
+@@ -39,6 +39,7 @@ MODULE_PARM_DESC(cryptd_max_cpu_qlen, "Set cryptd Max queue depth");
+ struct cryptd_cpu_queue {
+ 	struct crypto_queue queue;
+ 	struct work_struct work;
++	spinlock_t qlock;
+ };
+ 
+ struct cryptd_queue {
+@@ -117,6 +118,7 @@ static int cryptd_init_queue(struct cryptd_queue *queue,
+ 		cpu_queue = per_cpu_ptr(queue->cpu_queue, cpu);
+ 		crypto_init_queue(&cpu_queue->queue, max_cpu_qlen);
+ 		INIT_WORK(&cpu_queue->work, cryptd_queue_worker);
++		spin_lock_init(&cpu_queue->qlock);
+ 	}
+ 	pr_info("cryptd: max_cpu_qlen set to %d\n", max_cpu_qlen);
+ 	return 0;
+@@ -141,8 +143,10 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
+ 	struct cryptd_cpu_queue *cpu_queue;
+ 	atomic_t *refcnt;
+ 
+-	cpu = get_cpu();
+-	cpu_queue = this_cpu_ptr(queue->cpu_queue);
++	cpu_queue = raw_cpu_ptr(queue->cpu_queue);
++	spin_lock_bh(&cpu_queue->qlock);
++	cpu = smp_processor_id();
++
+ 	err = crypto_enqueue_request(&cpu_queue->queue, request);
+ 
+ 	refcnt = crypto_tfm_ctx(request->tfm);
+@@ -158,7 +162,7 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
+ 	atomic_inc(refcnt);
+ 
+ out_put_cpu:
+-	put_cpu();
++	spin_unlock_bh(&cpu_queue->qlock);
+ 
+ 	return err;
+ }
+@@ -174,16 +178,11 @@ static void cryptd_queue_worker(struct work_struct *work)
+ 	cpu_queue = container_of(work, struct cryptd_cpu_queue, work);
+ 	/*
+ 	 * Only handle one request at a time to avoid hogging crypto workqueue.
+-	 * preempt_disable/enable is used to prevent being preempted by
+-	 * cryptd_enqueue_request(). local_bh_disable/enable is used to prevent
+-	 * cryptd_enqueue_request() being accessed from software interrupts.
+ 	 */
+-	local_bh_disable();
+-	preempt_disable();
++	spin_lock_bh(&cpu_queue->qlock);
+ 	backlog = crypto_get_backlog(&cpu_queue->queue);
+ 	req = crypto_dequeue_request(&cpu_queue->queue);
+-	preempt_enable();
+-	local_bh_enable();
++	spin_unlock_bh(&cpu_queue->qlock);
+ 
+ 	if (!req)
+ 		return;
+--- crypto/scompress.c
++++ crypto/scompress.c
+@@ -24,6 +24,7 @@
+ #include <linux/cryptouser.h>
+ #include <net/netlink.h>
+ #include <linux/scatterlist.h>
++#include <linux/locallock.h>
+ #include <crypto/scatterwalk.h>
+ #include <crypto/internal/acompress.h>
+ #include <crypto/internal/scompress.h>
+@@ -34,6 +35,7 @@ static void * __percpu *scomp_src_scratches;
+ static void * __percpu *scomp_dst_scratches;
+ static int scomp_scratch_users;
+ static DEFINE_MUTEX(scomp_lock);
++static DEFINE_LOCAL_IRQ_LOCK(scomp_scratches_lock);
+ 
+ #ifdef CONFIG_NET
+ static int crypto_scomp_report(struct sk_buff *skb, struct crypto_alg *alg)
+@@ -146,7 +148,7 @@ static int scomp_acomp_comp_decomp(struct acomp_req *req, int dir)
+ 	void **tfm_ctx = acomp_tfm_ctx(tfm);
+ 	struct crypto_scomp *scomp = *tfm_ctx;
+ 	void **ctx = acomp_request_ctx(req);
+-	const int cpu = get_cpu();
++	const int cpu = local_lock_cpu(scomp_scratches_lock);
+ 	u8 *scratch_src = *per_cpu_ptr(scomp_src_scratches, cpu);
+ 	u8 *scratch_dst = *per_cpu_ptr(scomp_dst_scratches, cpu);
+ 	int ret;
+@@ -181,7 +183,7 @@ static int scomp_acomp_comp_decomp(struct acomp_req *req, int dir)
+ 					 1);
+ 	}
+ out:
+-	put_cpu();
++	local_unlock_cpu(scomp_scratches_lock);
+ 	return ret;
+ }
+ 
+--- drivers/block/zram/zcomp.c
++++ drivers/block/zram/zcomp.c
+@@ -116,12 +116,20 @@ ssize_t zcomp_available_show(const char *comp, char *buf)
+ 
+ struct zcomp_strm *zcomp_stream_get(struct zcomp *comp)
+ {
+-	return *get_cpu_ptr(comp->stream);
++	struct zcomp_strm *zstrm;
++
++	zstrm = *get_local_ptr(comp->stream);
++	spin_lock(&zstrm->zcomp_lock);
++	return zstrm;
+ }
+ 
+ void zcomp_stream_put(struct zcomp *comp)
+ {
+-	put_cpu_ptr(comp->stream);
++	struct zcomp_strm *zstrm;
++
++	zstrm = *this_cpu_ptr(comp->stream);
++	spin_unlock(&zstrm->zcomp_lock);
++	put_local_ptr(zstrm);
+ }
+ 
+ int zcomp_compress(struct zcomp_strm *zstrm,
+@@ -171,6 +179,7 @@ int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
+ 		pr_err("Can't allocate a compression stream\n");
+ 		return -ENOMEM;
+ 	}
++	spin_lock_init(&zstrm->zcomp_lock);
+ 	*per_cpu_ptr(comp->stream, cpu) = zstrm;
+ 	return 0;
+ }
+--- drivers/block/zram/zcomp.h
++++ drivers/block/zram/zcomp.h
+@@ -14,6 +14,7 @@ struct zcomp_strm {
+ 	/* compression/decompression buffer */
+ 	void *buffer;
+ 	struct crypto_comp *tfm;
++	spinlock_t zcomp_lock;
+ };
+ 
+ /* dynamic per-device compression frontend */
+--- drivers/block/zram/zram_drv.c
++++ drivers/block/zram/zram_drv.c
+@@ -53,6 +53,40 @@ static size_t huge_class_size;
+ 
+ static void zram_free_page(struct zram *zram, size_t index);
+ 
++#ifdef CONFIG_PREEMPT_RT_BASE
++static void zram_meta_init_table_locks(struct zram *zram, size_t num_pages)
++{
++	size_t index;
++
++	for (index = 0; index < num_pages; index++)
++		spin_lock_init(&zram->table[index].lock);
++}
++
++static int zram_slot_trylock(struct zram *zram, u32 index)
++{
++	int ret;
++
++	ret = spin_trylock(&zram->table[index].lock);
++	if (ret)
++		__set_bit(ZRAM_LOCK, &zram->table[index].value);
++	return ret;
++}
++
++static void zram_slot_lock(struct zram *zram, u32 index)
++{
++	spin_lock(&zram->table[index].lock);
++	__set_bit(ZRAM_LOCK, &zram->table[index].value);
++}
++
++static void zram_slot_unlock(struct zram *zram, u32 index)
++{
++	__clear_bit(ZRAM_LOCK, &zram->table[index].value);
++	spin_unlock(&zram->table[index].lock);
++}
++
++#else
++static void zram_meta_init_table_locks(struct zram *zram, size_t num_pages) { }
++
+ static int zram_slot_trylock(struct zram *zram, u32 index)
+ {
+ 	return bit_spin_trylock(ZRAM_LOCK, &zram->table[index].value);
+@@ -903,6 +938,8 @@ static DEVICE_ATTR_RO(io_stat);
+ static DEVICE_ATTR_RO(mm_stat);
+ static DEVICE_ATTR_RO(debug_stat);
+ 
++
++
+ static void zram_meta_free(struct zram *zram, u64 disksize)
+ {
+ 	size_t num_pages = disksize >> PAGE_SHIFT;
+@@ -933,6 +970,7 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
+ 
+ 	if (!huge_class_size)
+ 		huge_class_size = zs_huge_class_size(zram->mem_pool);
++	zram_meta_init_table_locks(zram, num_pages);
+ 	return true;
+ }
+ 
+@@ -991,6 +1029,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
+ 	unsigned long handle;
+ 	unsigned int size;
+ 	void *src, *dst;
++	struct zcomp_strm *zstrm;
+ 
+ 	if (zram_wb_enabled(zram)) {
+ 		zram_slot_lock(zram, index);
+@@ -1025,6 +1064,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
+ 
+ 	size = zram_get_obj_size(zram, index);
+ 
++	zstrm = zcomp_stream_get(zram->comp);
+ 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
+ 	if (size == PAGE_SIZE) {
+ 		dst = kmap_atomic(page);
+@@ -1032,14 +1072,13 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
+ 		kunmap_atomic(dst);
+ 		ret = 0;
+ 	} else {
+-		struct zcomp_strm *zstrm = zcomp_stream_get(zram->comp);
+ 
+ 		dst = kmap_atomic(page);
+ 		ret = zcomp_decompress(zstrm, src, size, dst);
+ 		kunmap_atomic(dst);
+-		zcomp_stream_put(zram->comp);
+ 	}
+ 	zs_unmap_object(zram->mem_pool, handle);
++	zcomp_stream_put(zram->comp);
+ 	zram_slot_unlock(zram, index);
+ 
+ 	/* Should NEVER happen. Return bio error if it does. */
+--- drivers/block/zram/zram_drv.h
++++ drivers/block/zram/zram_drv.h
+@@ -61,6 +61,9 @@ struct zram_table_entry {
+ 		unsigned long element;
+ 	};
+ 	unsigned long value;
++#ifdef CONFIG_PREEMPT_RT_BASE
++	spinlock_t lock;
++#endif
+ #ifdef CONFIG_ZRAM_MEMORY_TRACKING
+ 	ktime_t ac_time;
+ #endif
+--- drivers/char/random.c
++++ drivers/char/random.c
+@@ -1232,28 +1232,27 @@ static __u32 get_reg(struct fast_pool *f, struct pt_regs *regs)
+ 	return *ptr;
+ }
+ 
+-void add_interrupt_randomness(int irq, int irq_flags)
++void add_interrupt_randomness(int irq, int irq_flags, __u64 ip)
+ {
+ 	struct entropy_store	*r;
+ 	struct fast_pool	*fast_pool = this_cpu_ptr(&irq_randomness);
+-	struct pt_regs		*regs = get_irq_regs();
+ 	unsigned long		now = jiffies;
+ 	cycles_t		cycles = random_get_entropy();
+ 	__u32			c_high, j_high;
+-	__u64			ip;
+ 	unsigned long		seed;
+ 	int			credit = 0;
+ 
+ 	if (cycles == 0)
+-		cycles = get_reg(fast_pool, regs);
++		cycles = get_reg(fast_pool, NULL);
+ 	c_high = (sizeof(cycles) > 4) ? cycles >> 32 : 0;
+ 	j_high = (sizeof(now) > 4) ? now >> 32 : 0;
+ 	fast_pool->pool[0] ^= cycles ^ j_high ^ irq;
+ 	fast_pool->pool[1] ^= now ^ c_high;
+-	ip = regs ? instruction_pointer(regs) : _RET_IP_;
++	if (!ip)
++		ip = _RET_IP_;
+ 	fast_pool->pool[2] ^= ip;
+ 	fast_pool->pool[3] ^= (sizeof(ip) > 4) ? ip >> 32 :
+-		get_reg(fast_pool, regs);
++		get_reg(fast_pool, NULL);
+ 
+ 	fast_mix(fast_pool);
+ 	add_interrupt_bench(cycles);
+--- drivers/char/tpm/tpm_tis.c
++++ drivers/char/tpm/tpm_tis.c
+@@ -53,6 +53,31 @@ static inline struct tpm_tis_tcg_phy *to_tpm_tis_tcg_phy(struct tpm_tis_data *da
+ 	return container_of(data, struct tpm_tis_tcg_phy, priv);
+ }
+ 
++#ifdef CONFIG_PREEMPT_RT_FULL
++/*
++ * Flushes previous write operations to chip so that a subsequent
++ * ioread*()s won't stall a cpu.
++ */
++static inline void tpm_tis_flush(void __iomem *iobase)
++{
++	ioread8(iobase + TPM_ACCESS(0));
++}
++#else
++#define tpm_tis_flush(iobase) do { } while (0)
++#endif
++
++static inline void tpm_tis_iowrite8(u8 b, void __iomem *iobase, u32 addr)
++{
++	iowrite8(b, iobase + addr);
++	tpm_tis_flush(iobase);
++}
++
++static inline void tpm_tis_iowrite32(u32 b, void __iomem *iobase, u32 addr)
++{
++	iowrite32(b, iobase + addr);
++	tpm_tis_flush(iobase);
++}
++
+ static bool interrupts = true;
+ module_param(interrupts, bool, 0444);
+ MODULE_PARM_DESC(interrupts, "Enable interrupts");
+@@ -150,7 +175,7 @@ static int tpm_tcg_write_bytes(struct tpm_tis_data *data, u32 addr, u16 len,
+ 	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
+ 
+ 	while (len--)
+-		iowrite8(*value++, phy->iobase + addr);
++		tpm_tis_iowrite8(*value++, phy->iobase, addr);
+ 
+ 	return 0;
+ }
+@@ -177,7 +202,7 @@ static int tpm_tcg_write32(struct tpm_tis_data *data, u32 addr, u32 value)
+ {
+ 	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
+ 
+-	iowrite32(value, phy->iobase + addr);
++	tpm_tis_iowrite32(value, phy->iobase, addr);
+ 
+ 	return 0;
+ }
+--- drivers/clocksource/Kconfig
++++ drivers/clocksource/Kconfig
+@@ -404,8 +404,11 @@ config ARMV7M_SYSTICK
+ 	  This options enables support for the ARMv7M system timer unit
+ 
+ config ATMEL_PIT
++	bool "Microchip ARM Periodic Interval Timer (PIT)" if COMPILE_TEST
+ 	select TIMER_OF if OF
+-	def_bool SOC_AT91SAM9 || SOC_SAMA5
++	help
++	  This enables build of clocksource and clockevent driver for
++	  the integrated PIT in Microchip ARM SoCs.
+ 
+ config ATMEL_ST
+ 	bool "Atmel ST timer support" if COMPILE_TEST
+@@ -415,6 +418,14 @@ config ATMEL_ST
+ 	help
+ 	  Support for the Atmel ST timer.
+ 
++config ATMEL_ARM_TCB_CLKSRC
++	bool "Microchip ARM TC Block" if COMPILE_TEST
++	select REGMAP_MMIO
++	depends on GENERIC_CLOCKEVENTS
++	help
++	  This enables build of clocksource and clockevent driver for
++	  the integrated Timer Counter Blocks in Microchip ARM SoCs.
++
+ config CLKSRC_EXYNOS_MCT
+ 	bool "Exynos multi core timer driver" if COMPILE_TEST
+ 	depends on ARM || ARM64
+--- drivers/clocksource/Makefile
++++ drivers/clocksource/Makefile
+@@ -3,7 +3,8 @@ obj-$(CONFIG_TIMER_OF)		+= timer-of.o
+ obj-$(CONFIG_TIMER_PROBE)	+= timer-probe.o
+ obj-$(CONFIG_ATMEL_PIT)		+= timer-atmel-pit.o
+ obj-$(CONFIG_ATMEL_ST)		+= timer-atmel-st.o
+-obj-$(CONFIG_ATMEL_TCB_CLKSRC)	+= tcb_clksrc.o
++obj-$(CONFIG_ATMEL_TCB_CLKSRC) += tcb_clksrc.o
++obj-$(CONFIG_ATMEL_ARM_TCB_CLKSRC)	+= timer-atmel-tcb.o
+ obj-$(CONFIG_X86_PM_TIMER)	+= acpi_pm.o
+ obj-$(CONFIG_SCx200HR_TIMER)	+= scx200_hrt.o
+ obj-$(CONFIG_CS5535_CLOCK_EVENT_SRC)	+= cs5535-clockevt.o
+--- drivers/clocksource/tcb_clksrc.c
++++ drivers/clocksource/tcb_clksrc.c
+@@ -25,8 +25,7 @@
+  *     this 32 bit free-running counter. the second channel is not used.
+  *
+  *   - The third channel may be used to provide a 16-bit clockevent
+- *     source, used in either periodic or oneshot mode.  This runs
+- *     at 32 KiHZ, and can handle delays of up to two seconds.
++ *     source, used in either periodic or oneshot mode.
+  *
+  * A boot clocksource and clockevent source are also currently needed,
+  * unless the relevant platforms (ARM/AT91, AVR32/AT32) are changed so
+@@ -126,6 +125,8 @@ static struct clocksource clksrc = {
+ struct tc_clkevt_device {
+ 	struct clock_event_device	clkevt;
+ 	struct clk			*clk;
++	bool				clk_enabled;
++	u32				freq;
+ 	void __iomem			*regs;
+ };
+ 
+@@ -134,15 +135,26 @@ static struct tc_clkevt_device *to_tc_clkevt(struct clock_event_device *clkevt)
+ 	return container_of(clkevt, struct tc_clkevt_device, clkevt);
+ }
+ 
+-/* For now, we always use the 32K clock ... this optimizes for NO_HZ,
+- * because using one of the divided clocks would usually mean the
+- * tick rate can never be less than several dozen Hz (vs 0.5 Hz).
+- *
+- * A divided clock could be good for high resolution timers, since
+- * 30.5 usec resolution can seem "low".
+- */
+ static u32 timer_clock;
+ 
++static void tc_clk_disable(struct clock_event_device *d)
++{
++	struct tc_clkevt_device *tcd = to_tc_clkevt(d);
++
++	clk_disable(tcd->clk);
++	tcd->clk_enabled = false;
++}
++
++static void tc_clk_enable(struct clock_event_device *d)
++{
++	struct tc_clkevt_device *tcd = to_tc_clkevt(d);
++
++	if (tcd->clk_enabled)
++		return;
++	clk_enable(tcd->clk);
++	tcd->clk_enabled = true;
++}
++
+ static int tc_shutdown(struct clock_event_device *d)
+ {
+ 	struct tc_clkevt_device *tcd = to_tc_clkevt(d);
+@@ -150,8 +162,14 @@ static int tc_shutdown(struct clock_event_device *d)
+ 
+ 	writel(0xff, regs + ATMEL_TC_REG(2, IDR));
+ 	writel(ATMEL_TC_CLKDIS, regs + ATMEL_TC_REG(2, CCR));
++	return 0;
++}
++
++static int tc_shutdown_clk_off(struct clock_event_device *d)
++{
++	tc_shutdown(d);
+ 	if (!clockevent_state_detached(d))
+-		clk_disable(tcd->clk);
++		tc_clk_disable(d);
+ 
+ 	return 0;
+ }
+@@ -164,9 +182,9 @@ static int tc_set_oneshot(struct clock_event_device *d)
+ 	if (clockevent_state_oneshot(d) || clockevent_state_periodic(d))
+ 		tc_shutdown(d);
+ 
+-	clk_enable(tcd->clk);
++	tc_clk_enable(d);
+ 
+-	/* slow clock, count up to RC, then irq and stop */
++	/* count up to RC, then irq and stop */
+ 	writel(timer_clock | ATMEL_TC_CPCSTOP | ATMEL_TC_WAVE |
+ 		     ATMEL_TC_WAVESEL_UP_AUTO, regs + ATMEL_TC_REG(2, CMR));
+ 	writel(ATMEL_TC_CPCS, regs + ATMEL_TC_REG(2, IER));
+@@ -186,12 +204,12 @@ static int tc_set_periodic(struct clock_event_device *d)
+ 	/* By not making the gentime core emulate periodic mode on top
+ 	 * of oneshot, we get lower overhead and improved accuracy.
+ 	 */
+-	clk_enable(tcd->clk);
++	tc_clk_enable(d);
+ 
+-	/* slow clock, count up to RC, then irq and restart */
++	/* count up to RC, then irq and restart */
+ 	writel(timer_clock | ATMEL_TC_WAVE | ATMEL_TC_WAVESEL_UP_AUTO,
+ 		     regs + ATMEL_TC_REG(2, CMR));
+-	writel((32768 + HZ / 2) / HZ, tcaddr + ATMEL_TC_REG(2, RC));
++	writel((tcd->freq + HZ / 2) / HZ, tcaddr + ATMEL_TC_REG(2, RC));
+ 
+ 	/* Enable clock and interrupts on RC compare */
+ 	writel(ATMEL_TC_CPCS, regs + ATMEL_TC_REG(2, IER));
+@@ -218,9 +236,13 @@ static struct tc_clkevt_device clkevt = {
+ 		.features		= CLOCK_EVT_FEAT_PERIODIC |
+ 					  CLOCK_EVT_FEAT_ONESHOT,
+ 		/* Should be lower than at91rm9200's system timer */
++#ifdef CONFIG_ATMEL_TCB_CLKSRC_USE_SLOW_CLOCK
+ 		.rating			= 125,
++#else
++		.rating			= 200,
++#endif
+ 		.set_next_event		= tc_next_event,
+-		.set_state_shutdown	= tc_shutdown,
++		.set_state_shutdown	= tc_shutdown_clk_off,
+ 		.set_state_periodic	= tc_set_periodic,
+ 		.set_state_oneshot	= tc_set_oneshot,
+ 	},
+@@ -240,8 +262,9 @@ static irqreturn_t ch2_irq(int irq, void *handle)
+ 	return IRQ_NONE;
+ }
+ 
+-static int __init setup_clkevents(struct atmel_tc *tc, int clk32k_divisor_idx)
++static int __init setup_clkevents(struct atmel_tc *tc, int divisor_idx)
+ {
++	unsigned divisor = atmel_tc_divisors[divisor_idx];
+ 	int ret;
+ 	struct clk *t2_clk = tc->clk[2];
+ 	int irq = tc->irq[2];
+@@ -262,7 +285,11 @@ static int __init setup_clkevents(struct atmel_tc *tc, int clk32k_divisor_idx)
+ 	clkevt.regs = tc->regs;
+ 	clkevt.clk = t2_clk;
+ 
+-	timer_clock = clk32k_divisor_idx;
++	timer_clock = divisor_idx;
++	if (!divisor)
++		clkevt.freq = 32768;
++	else
++		clkevt.freq = clk_get_rate(t2_clk) / divisor;
+ 
+ 	clkevt.clkevt.cpumask = cpumask_of(0);
+ 
+@@ -273,7 +300,7 @@ static int __init setup_clkevents(struct atmel_tc *tc, int clk32k_divisor_idx)
+ 		return ret;
+ 	}
+ 
+-	clockevents_config_and_register(&clkevt.clkevt, 32768, 1, 0xffff);
++	clockevents_config_and_register(&clkevt.clkevt, clkevt.freq, 1, 0xffff);
+ 
+ 	return ret;
+ }
+@@ -410,7 +437,11 @@ static int __init tcb_clksrc_init(void)
+ 		goto err_disable_t1;
+ 
+ 	/* channel 2:  periodic and oneshot timer support */
++#ifdef CONFIG_ATMEL_TCB_CLKSRC_USE_SLOW_CLOCK
+ 	ret = setup_clkevents(tc, clk32k_divisor_idx);
++#else
++	ret = setup_clkevents(tc, best_divisor_idx);
++#endif
+ 	if (ret)
+ 		goto err_unregister_clksrc;
+ 
